@@ -2,20 +2,17 @@ name: Naver BlogHome to Notion
 
 on:
   schedule:
-    # 매일 18:00 UTC = 한국 새벽 3시
+    # 매일 18:00 UTC = 한국시간 새벽 3시
     - cron: '0 18 * * *'
-  workflow_dispatch: {}  # 수동 실행 버튼
+  workflow_dispatch: {} # 수동 실행 버튼
+
+concurrency:
+  group: notion-scripts
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
-    env:
-      NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
-      NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
-      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-      MAX_PAGE: 140
 
     steps:
       - name: Checkout repo
@@ -31,3 +28,8 @@ jobs:
 
       - name: Run scraper
         run: npm start
+        env:
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          MAX_PAGE: ${{ secrets.MAX_PAGE }}
