@@ -16,7 +16,7 @@ function normalizeDate(pubdate) {
     return pubdate;
   }
 
-  // 모르겠으면 지금 시각으로 (나중에 필요하면 개선)
+  // 혹시 다른 형식이면 현재 시각으로 대체
   return new Date().toISOString();
 }
 
@@ -28,7 +28,6 @@ export async function upsertPost(post) {
     pubdate,
     description,
     category,
-    blogid,
     postId,
   } = post;
 
@@ -36,14 +35,12 @@ export async function upsertPost(post) {
 
   const uniqueId = postId || link;
 
-  // UniqueID 중복 체크
+  // 중복 체크 (UniqueID 기준)
   const existing = await notion.databases.query({
     database_id: databaseId,
     filter: {
       property: 'UniqueID',
-      rich_text: {
-        equals: uniqueId,
-      },
+      rich_text: { equals: uniqueId },
     },
   });
 
@@ -53,15 +50,9 @@ export async function upsertPost(post) {
   }
 
   const properties = {
-    Title: {
-      title: [{ text: { content: title } }],
-    },
-    URL: {
-      url: link,
-    },
-    UniqueID: {
-      rich_text: [{ text: { content: uniqueId } }],
-    },
+    Title: { title: [{ text: { content: title } }] },
+    URL: { url: link },
+    UniqueID: { rich_text: [{ text: { content: uniqueId } }] },
   };
 
   if (nickname) {
@@ -73,33 +64,19 @@ export async function upsertPost(post) {
   if (pubdate) {
     const normalized = normalizeDate(pubdate);
     if (normalized) {
-      properties.PubDate = {
-        date: { start: normalized },
-      };
+      properties['원본 날짜'] = { date: { start: normalized } };
     }
   }
 
   if (description) {
     properties.Description = {
-      rich_text: [
-        {
-          text: {
-            content: description.slice(0, 1800),
-          },
-        },
-      ],
+      rich_text: [{ text: { content: description.slice(0, 1800) } }],
     };
   }
 
   if (category) {
     properties.Category = {
       rich_text: [{ text: { content: category } }],
-    };
-  }
-
-  if (blogid) {
-    properties.BlogID = {
-      rich_text: [{ text: { content: blogid } }],
     };
   }
 
