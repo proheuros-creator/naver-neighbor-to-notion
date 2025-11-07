@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import fetch from 'node-fetch';
-import * as cheerio from 'cheerio';
 import { upsertPost } from './notion.js';
 
 const NAVER_COOKIE = process.env.NAVER_COOKIE;
+const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
 const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
 
 if (!NAVER_COOKIE) {
@@ -11,116 +11,137 @@ if (!NAVER_COOKIE) {
   process.exit(1);
 }
 
-// 페이지별 BlogHome URL 생성
-function buildPageUrl(page) {
-  return `https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=${page}&groupId=0`;
+if (!API_TEMPLATE) {
+  console.error('❌ NAVER_NEIGHBOR_API_URL 이 설정되어 있지 않습니다.');
+  process.exit(1);
 }
 
-async function fetchPageHtml(page) {
+// API_TEMPLATE 은 BuddyPostList.naver?page=1&groupId=0 형태여야 함.
+// page= 뒷부분만 교체하면서 1~MAX_PAGE 반복 호출.
+function buildPageUrl(page) {
+  try {
+    const url = new URL(API_TEMPLATE);
+    url.searchParams.set('page', String(page));
+    return url.toString();
+  } catch (e) {
+    // 만약 URL 생성 실패하면, 정규식으로 대충 치환
+    return API_TEMPLATE.replace(/page=\d+/, `page=${page}`);
+  }
+}
+
+async function fetchPagePosts(page) {
   const url = buildPageUrl(page);
 
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (NaverBlogHomeScraper)',
+      'User-Agent': 'Mozilla/5.0 (NaverNeighborScraper)',
       'Cookie': NAVER_COOKIE,
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': 'https://section.blog.naver.com/BlogHome.naver'
     },
   });
 
   if (!res.ok) {
-    console.error(`❌ 페이지 ${page} 요청 실패:`, res.status, res.statusText);
-    return null;
+    console.error(`❌ ${page}페이지 API 요청 실패:`, res.status, res.statusText);
+    return [];
   }
 
-  return await res.text();
-}
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    console.error(`❌ ${page}페이지 JSON 파싱 실패:`, e.message);
+    return [];
+  }
 
-// BlogHome 페이지 HTML → 게시글 리스트 파싱
-function parsePostsFromPage(html) {
-  const $ = cheerio.load(html);
-  const posts = [];
+  // BuddyPostList 응답 구조에 맞춰서 리스트 추출
+  // (일반적으로 result.buddyPostList 안에 들어있을 가능성이 큼)
+  const list =
+    data.result?.buddyPostList ||
+    data.buddyPostList ||
+    data.list ||
+    data.items ||
+    [];
 
-  // 네이버 BlogHome의 카드/리스트 구조를 넓게 잡아서 탐색
-  // (실제 구조에 따라 조정 가능)
-  $('li, .item, .list_post, .list_item').each((_, el) => {
-    const $el = $(el);
+  return list
+    .map((item) => {
+      // 🔧 여기 키 이름은 BuddyPostList 응답 구조 기준 (대표적인 패턴)
+      const title =
+        item.title ||
+        item.postTitle ||
+        '';
 
-    // 블로그 글 링크: blog.naver.com 포함된 첫 번째 a 태그
-    let link = $el.find('a[href*="blog.naver.com"]').first().attr('href');
-    if (!link) return;
+      const blogId =
+        item.blogId ||
+        item.blogNo ||
+        item.bloggerId ||
+        '';
 
-    // 상대경로면 절대 URL로
-    if (link.startsWith('/')) {
-      link = `https://blog.naver.com${link}`;
-    }
+      const logNo =
+        item.logNo ||
+        item.postId ||
+        item.articleId ||
+        null;
 
-    // 제목: 링크 안 텍스트 또는 주변 텍스트
-    const title =
-      ($el.find('a[href*="blog.naver.com"]').first().text() ||
-        $el.find('.title, .tit').first().text() ||
-        '').trim();
+      const link =
+        item.url ||
+        item.postUrl ||
+        (blogId && logNo
+          ? `https://blog.naver.com/${blogId}/${logNo}`
+          : '');
 
-    if (!title) return;
+      const nickname =
+        item.nickName ||
+        item.bloggerName ||
+        item.userName ||
+        '';
 
-    // 닉네임/블로그명
-    const nickname =
-      ($el.find('.nick, .nickname, .blogger, .user').first().text() ||
-        '').trim() || null;
+      const pubdate =
+        item.addDate ||
+        item.postDate ||
+        item.writeDate ||
+        item.regDate ||
+        item.createdAt ||
+        null;
 
-    // 날짜
-    const pubdate =
-      ($el.find('.date, .time').first().text() || '').trim() || null;
+      const description =
+        item.briefContents ||
+        item.summary ||
+        item.contentsPreview ||
+        item.previewText ||
+        '';
 
-    // 요약
-    const description =
-      ($el.find('.desc, .dsc, .summary, .post_text, .txt').first().text() ||
-        '').trim() || null;
+      const category =
+        item.categoryName ||
+        item.directoryName ||
+        item.category ||
+        '';
 
-    // 카테고리
-    const category =
-      ($el.find('.category, .cate').first().text() || '').trim() || null;
+      const postId = logNo || null;
 
-    // UniqueID용 postId 추출 (URL에서 logNo나 숫자 부분)
-    let postId = null;
-    try {
-      const u = new URL(link);
-      const logNo = u.searchParams.get('logNo');
-      if (logNo) {
-        postId = logNo;
-      } else {
-        const parts = u.pathname.split('/').filter(Boolean);
-        if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
-          postId = parts[1];
-        }
-      }
-    } catch (e) {
-      // URL 파싱 실패시 무시
-    }
+      if (!title || !link) return null;
 
-    posts.push({
-      title,
-      link,
-      nickname,
-      pubdate,
-      description,
-      category,
-      postId,
-    });
-  });
-
-  return posts;
+      return {
+        title,
+        link,
+        nickname,
+        pubdate,
+        description,
+        category,
+        postId,
+      };
+    })
+    .filter(Boolean);
 }
 
 async function main() {
-  console.log('🚀 Naver BlogHome → Notion 스크랩 시작');
+  console.log('🚀 BuddyPostList API → Notion 스크랩 시작');
   console.log(`📄 대상 페이지: 1 ~ ${MAX_PAGE}`);
 
   let total = 0;
 
   for (let page = 1; page <= MAX_PAGE; page++) {
-    const html = await fetchPageHtml(page);
-    if (!html) continue;
-
-    const posts = parsePostsFromPage(html);
+    const posts = await fetchPagePosts(page);
     console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
     total += posts.length;
 
