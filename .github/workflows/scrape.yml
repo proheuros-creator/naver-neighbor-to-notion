@@ -1,8 +1,8 @@
-name: Naver Neighbor to Notion
+name: Naver BlogHome to Notion
 
 on:
   schedule:
-    # 매일 18:00 UTC = 한국시간 새벽 3시
+    # 매일 18:00 UTC = 한국 새벽 3시
     - cron: '0 18 * * *'
   workflow_dispatch: {}  # 수동 실행 버튼
 
@@ -28,3 +28,4 @@ jobs:
           NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          MAX_PAGE: ${{ secrets.MAX_PAGE }}
