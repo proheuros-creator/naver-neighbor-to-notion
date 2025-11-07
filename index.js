@@ -7,7 +7,7 @@ const NAVER_COOKIE = process.env.NAVER_COOKIE;
 const NEIGHBOR_URL = 'https://section.blog.naver.com/neighbor';
 
 if (!NAVER_COOKIE) {
-  console.error('❌ NAVER_COOKIE 가 설정되어 있지 않습니다.');
+  console.error('❌ NAVER_COOKIE 가 설정되어 있지 않습니다. (GitHub Secrets에 NAVER_COOKIE 추가했는지 확인)');
   process.exit(1);
 }
 
@@ -32,13 +32,13 @@ function extractPostIdFromUrl(url) {
   try {
     const u = new URL(url);
 
-    // /blogId/postId
+    // 형태 1: /blogId/postId
     const parts = u.pathname.split('/').filter(Boolean);
     if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
       return parts[1];
     }
 
-    // PostView.naver?blogId=xxx&logNo=yyy
+    // 형태 2: PostView.naver?blogId=xxx&logNo=yyy
     const logNo = u.searchParams.get('logNo');
     if (logNo) return logNo;
 
@@ -52,22 +52,25 @@ function parsePosts(html) {
   const $ = cheerio.load(html);
   const posts = [];
 
-  // ⚠️ 셀렉터는 네이버 구조에 따라 조정 필요. 일단 예시.
+  // ⚠️ 네이버 구조에 따라 class 이름이 다를 수 있음 → 안 나오면 나중에 같이 셀렉터만 손보자
   $('.feed_item, .item, .list_item').each((_, el) => {
     const $el = $(el);
 
     const title =
       $el.find('.item_title, .title, a.link').first().text().trim() || null;
 
-    let link = $el.find('a.item_link, a.link, a').first().attr('href') || '';
+    let link =
+      $el.find('a.item_link, a.link, a').first().attr('href') || '';
 
     if (link && link.startsWith('/')) {
       link = `https://blog.naver.com${link}`;
     }
 
     const nickname =
-      $el.find('.nickname, .blogger, .user, .name').first().text().trim() ||
-      null;
+      $el.find('.nickname, .blogger, .user, .name')
+        .first()
+        .text()
+        .trim() || null;
 
     const pubRaw =
       $el.find('time').attr('datetime') ||
@@ -75,27 +78,15 @@ function parsePosts(html) {
       null;
 
     const description =
-      $el.find('.desc, .summary, .text, .preview').first().text().trim() ||
-      null;
+      $el.find('.desc, .summary, .text, .preview')
+        .first()
+        .text()
+        .trim() || null;
 
     const category =
       $el.find('.category, .tag').first().text().trim() || null;
 
-    let blogid = null;
-    let postId = null;
-
-    if (link) {
-      try {
-        const u = new URL(link);
-        const parts = u.pathname.split('/').filter(Boolean);
-        if (parts.length >= 1) {
-          blogid = parts[0];
-        }
-        postId = extractPostIdFromUrl(link);
-      } catch (e) {
-        // 무시
-      }
-    }
+    const postId = link ? extractPostIdFromUrl(link) : null;
 
     if (!title || !link) return;
 
@@ -106,7 +97,6 @@ function parsePosts(html) {
       pubdate: pubRaw,
       description,
       category,
-      blogid,
       postId,
     });
   });
@@ -119,7 +109,7 @@ async function main() {
 
   const html = await fetchNeighborHtml();
   if (!html) {
-    console.error('HTML 로드 실패');
+    console.error('❌ HTML 로드 실패');
     return;
   }
 
