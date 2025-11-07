@@ -8,16 +8,27 @@ if (!databaseId) {
   throw new Error('❌ NOTION_DATABASE_ID 가 설정되지 않았습니다.');
 }
 
+// pubdate 문자열을 Notion Date 형식으로 정리
 function normalizeDate(pubdate) {
   if (!pubdate) return null;
 
-  // YYYY-MM-DD 형식 있으면 그대로 사용
-  if (/\d{4}-\d{2}-\d{2}/.test(pubdate)) {
-    return pubdate;
-  }
+  // 2025.11.01, 2025-11-01 둘 다 처리용 대충 파서
+  const clean = pubdate
+    .toString()
+    .replace(/년|\.|\//g, '-')
+    .replace(/월|일/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  // 혹시 다른 형식이면 현재 시각으로 대체
-  return new Date().toISOString();
+  // YYYY-MM-DD 형식 추출 시도
+  const m = clean.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return null;
+
+  const [_, y, mo, d] = m;
+  const mm = mo.padStart(2, '0');
+  const dd = d.padStart(2, '0');
+
+  return `${y}-${mm}-${dd}`;
 }
 
 export async function upsertPost(post) {
@@ -35,24 +46,32 @@ export async function upsertPost(post) {
 
   const uniqueId = postId || link;
 
-  // 중복 체크 (UniqueID 기준)
+  // UniqueID 중복 체크
   const existing = await notion.databases.query({
     database_id: databaseId,
     filter: {
       property: 'UniqueID',
-      rich_text: { equals: uniqueId },
+      rich_text: {
+        equals: uniqueId,
+      },
     },
   });
 
   if (existing.results.length > 0) {
-    console.log(`↷ 이미 존재: ${title}`);
+    console.log(`↷ 이미 존재 (건너뜀): ${title}`);
     return;
   }
 
   const properties = {
-    Title: { title: [{ text: { content: title } }] },
-    URL: { url: link },
-    UniqueID: { rich_text: [{ text: { content: uniqueId } }] },
+    Title: {
+      title: [{ text: { content: title } }],
+    },
+    URL: {
+      url: link,
+    },
+    UniqueID: {
+      rich_text: [{ text: { content: uniqueId } }],
+    },
   };
 
   if (nickname) {
@@ -64,13 +83,19 @@ export async function upsertPost(post) {
   if (pubdate) {
     const normalized = normalizeDate(pubdate);
     if (normalized) {
-      properties['원본 날짜'] = { date: { start: normalized } };
+      properties['원본 날짜'] = {
+        date: { start: normalized },
+      };
     }
   }
 
   if (description) {
     properties.Description = {
-      rich_text: [{ text: { content: description.slice(0, 1800) } }],
+      rich_text: [
+        {
+          text: { content: description.slice(0, 1800) },
+        },
+      ],
     };
   }
 
