@@ -5,17 +5,17 @@ const databaseId = process.env.NOTION_DATABASE_ID;
 
 // postId 기준 중복 체크 후 업데이트 or 새로 생성
 export async function upsertPost(post) {
-  const postId = post.postId ? String(post.postId) : null; // ✅ 숫자를 문자열로 변환
+  const uniqueId = post.postId ? String(post.postId) : null;
 
-  // 1️⃣ 중복 여부 확인
+  // 1️⃣ 중복 여부 확인 (UniqueID로 검색)
   let existing;
-  if (postId) {
+  if (uniqueId) {
     const query = await notion.databases.query({
       database_id: databaseId,
       filter: {
-        property: 'postId',
+        property: 'UniqueID',
         rich_text: {
-          equals: postId, // ✅ 문자열로 비교
+          equals: uniqueId,
         },
       },
     });
@@ -23,6 +23,7 @@ export async function upsertPost(post) {
     existing = query.results?.[0];
   }
 
+  // 2️⃣ 속성 매핑 (노션 DB 컬럼명과 동일하게 설정)
   const properties = {
     Title: {
       title: [
@@ -33,27 +34,28 @@ export async function upsertPost(post) {
         },
       ],
     },
-    Link: {
+    URL: {
       url: post.link || null,
     },
-    Blogger: {
+    Nickname: {
       rich_text: [{ text: { content: post.nickname || '' } }],
     },
-    PubDate: post.pubdate
+    '원본 날짜': post.pubdate
       ? { date: { start: post.pubdate } }
       : undefined,
-    Description: {
-      rich_text: [{ text: { content: post.description || '' } }],
-    },
+    '생성 일시': { date: { start: new Date().toISOString() } },
     Category: {
       rich_text: [{ text: { content: post.category || '' } }],
     },
-    postId: {
-      rich_text: [{ text: { content: postId || '' } }],
+    Description: {
+      rich_text: [{ text: { content: post.description || '' } }],
+    },
+    UniqueID: {
+      rich_text: [{ text: { content: uniqueId || '' } }],
     },
   };
 
-  // 2️⃣ 존재하면 업데이트
+  // 3️⃣ 존재하면 업데이트, 없으면 새로 추가
   if (existing) {
     await notion.pages.update({
       page_id: existing.id,
@@ -61,7 +63,6 @@ export async function upsertPost(post) {
     });
     console.log(`🔄 업데이트: ${post.title}`);
   } else {
-    // 3️⃣ 없으면 새로 추가
     await notion.pages.create({
       parent: { database_id: databaseId },
       properties,
