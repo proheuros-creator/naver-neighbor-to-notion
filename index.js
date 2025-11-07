@@ -16,17 +16,21 @@ if (!API_TEMPLATE) {
   process.exit(1);
 }
 
-// API_TEMPLATE 은 BuddyPostList.naver?page=1&groupId=0 형태여야 함.
-// page= 뒷부분만 교체하면서 1~MAX_PAGE 반복 호출.
+// page=1이 들어있는 BuddyPostList URL을 기반으로 page만 바꿔서 사용
 function buildPageUrl(page) {
   try {
     const url = new URL(API_TEMPLATE);
     url.searchParams.set('page', String(page));
     return url.toString();
   } catch (e) {
-    // 만약 URL 생성 실패하면, 정규식으로 대충 치환
+    // 혹시 URL 생성 실패 시 대체 (단순 치환)
     return API_TEMPLATE.replace(/page=\d+/, `page=${page}`);
   }
+}
+
+// 네이버가 응답 앞에 붙이는 ")]}'," 같은 prefix 제거
+function stripNaverPrefix(raw) {
+  return raw.replace(/^\)\]\}',?\s*/, '');
 }
 
 async function fetchPagePosts(page) {
@@ -37,35 +41,46 @@ async function fetchPagePosts(page) {
       'User-Agent': 'Mozilla/5.0 (NaverNeighborScraper)',
       'Cookie': NAVER_COOKIE,
       'Accept': 'application/json, text/plain, */*',
-      'Referer': 'https://section.blog.naver.com/BlogHome.naver'
+      'Referer': 'https://section.blog.naver.com/BlogHome.naver',
     },
   });
 
   if (!res.ok) {
     console.error(`❌ ${page}페이지 API 요청 실패:`, res.status, res.statusText);
-    return [];
+    return { posts: [], hasMore: false };
   }
+
+  const raw = await res.text();
 
   let data;
   try {
-    data = await res.json();
+    const cleaned = stripNaverPrefix(raw);
+    data = JSON.parse(cleaned);
   } catch (e) {
     console.error(`❌ ${page}페이지 JSON 파싱 실패:`, e.message);
-    return [];
+    // 디버깅용: 앞부분 일부만 찍기
+    console.error(cleanedPreview(raw));
+    return { posts: [], hasMore: false };
   }
 
-  // BuddyPostList 응답 구조에 맞춰서 리스트 추출
-  // (일반적으로 result.buddyPostList 안에 들어있을 가능성이 큼)
+  // BuddyPostList 구조 추정:
+  // { result: { buddyPostList: [ ... ], more: true/false, hasMore: ... }, ... }
+  const result = data.result || data;
   const list =
-    data.result?.buddyPostList ||
-    data.buddyPostList ||
-    data.list ||
-    data.items ||
+    result.buddyPostList ||
+    result.postList ||
+    result.list ||
+    result.items ||
     [];
 
-  return list
+  const hasMore =
+    result.more === true ||
+    result.hasMore === true ||
+    (Array.isArray(list) && list.length > 0);
+
+  const posts = list
     .map((item) => {
-      // 🔧 여기 키 이름은 BuddyPostList 응답 구조 기준 (대표적인 패턴)
+      // 대표적인 키 이름에 맞춰 매핑
       const title =
         item.title ||
         item.postTitle ||
@@ -132,6 +147,14 @@ async function fetchPagePosts(page) {
       };
     })
     .filter(Boolean);
+
+  return { posts, hasMore };
+}
+
+// 디버깅용: JSON 파싱 실패 시 raw 앞부분만 출력
+function cleanedPreview(raw) {
+  const cleaned = stripNaverPrefix(raw || '');
+  return cleaned.slice(0, 120) + (cleaned.length > 120 ? '...' : '');
 }
 
 async function main() {
@@ -141,7 +164,7 @@ async function main() {
   let total = 0;
 
   for (let page = 1; page <= MAX_PAGE; page++) {
-    const posts = await fetchPagePosts(page);
+    const { posts, hasMore } = await fetchPagePosts(page);
     console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
     total += posts.length;
 
@@ -151,6 +174,12 @@ async function main() {
       } catch (err) {
         console.error('❌ Notion 저장 오류:', err.message);
       }
+    }
+
+    // 더 이상 글이 없으면 조기 종료
+    if (!hasMore || posts.length === 0) {
+      console.log(`⏹ ${page}페이지 이후로 데이터 없음. 조기 종료.`);
+      break;
     }
   }
 
