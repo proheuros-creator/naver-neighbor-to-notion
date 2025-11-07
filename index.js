@@ -16,24 +16,23 @@ if (!API_TEMPLATE) {
   process.exit(1);
 }
 
-// page=1이 들어있는 BuddyPostList URL을 기반으로 page만 바꿔서 사용
+// BuddyPostList?page=1 ... 를 기반으로 page만 교체
 function buildPageUrl(page) {
   try {
     const url = new URL(API_TEMPLATE);
     url.searchParams.set('page', String(page));
     return url.toString();
   } catch (e) {
-    // 혹시 URL 생성 실패 시 대체 (단순 치환)
     return API_TEMPLATE.replace(/page=\d+/, `page=${page}`);
   }
 }
 
-// 네이버가 응답 앞에 붙이는 ")]}'," 같은 prefix 제거
+// 네이버 prefix 제거
 function stripNaverPrefix(raw) {
-  return raw.replace(/^\)\]\}',?\s*/, '');
+  return (raw || '').replace(/^\)\]\}',?\s*/, '');
 }
 
-// 디버깅용: JSON 파싱 실패 시 raw 앞부분만 출력
+// JSON 파싱 실패 시 앞부분만 출력
 function cleanedPreview(raw) {
   const cleaned = stripNaverPrefix(raw || '');
   return cleaned.slice(0, 120) + (cleaned.length > 120 ? '...' : '');
@@ -68,7 +67,6 @@ async function fetchPagePosts(page) {
     return { posts: [] };
   }
 
-  // BuddyPostList 구조 대응
   const result = data.result || data;
   const list =
     result.buddyPostList ||
@@ -80,8 +78,16 @@ async function fetchPagePosts(page) {
   const posts = list
     .map((item) => {
       const title = item.title || item.postTitle || '';
-      const blogId = item.blogId || item.blogNo || item.bloggerId || '';
-      const logNo = item.logNo || item.postId || item.articleId || null;
+      const blogId =
+        item.blogId ||
+        item.blogNo ||
+        item.bloggerId ||
+        '';
+      const logNo =
+        item.logNo ||
+        item.postId ||
+        item.articleId ||
+        null;
 
       const link =
         item.url ||
@@ -129,20 +135,22 @@ async function fetchPagePosts(page) {
         description,
         category,
         postId,
+        blogId, // ✅ 여기서 blogId 포함
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .reverse(); // ✅ 페이지 내에서 "맨 아래 글 → 위" 순서로 처리
 
   return { posts };
 }
 
 async function main() {
   console.log('🚀 BuddyPostList API → Notion 스크랩 시작');
-  console.log(`📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순)`);
+  console.log(`📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순, 각 페이지는 역순 수집)`);
 
   let total = 0;
 
-  // 🔽 150페이지부터 1페이지까지 역순으로 스크랩
+  // 페이지는 여전히 MAX_PAGE부터 1까지 (내림차순)
   for (let page = MAX_PAGE; page >= 1; page--) {
     const { posts } = await fetchPagePosts(page);
     console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
