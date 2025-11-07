@@ -1,0 +1,27 @@
+name: Migrate BlogID Formula to Text
+
+on:
+  workflow_dispatch: {}  # 수동 실행만
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    env:
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run migration
+        run: npm run migrate:blogid
