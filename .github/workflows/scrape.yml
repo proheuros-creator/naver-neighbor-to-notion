@@ -10,6 +10,13 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
+    env:
+      NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+      NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      MAX_PAGE: 150
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -24,8 +31,3 @@ jobs:
 
       - name: Run scraper
         run: npm start
-        env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          MAX_PAGE: ${{ secrets.MAX_PAGE }}
