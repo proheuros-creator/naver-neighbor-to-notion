@@ -1,0 +1,30 @@
+name: Naver Neighbor to Notion
+
+on:
+  schedule:
+    # 매일 18:00 UTC = 한국시간 새벽 3시
+    - cron: '0 18 * * *'
+  workflow_dispatch: {}  # 수동 실행 버튼
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run scraper
+        run: npm start
+        env:
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
