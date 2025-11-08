@@ -1,0 +1,28 @@
+name: Migrate BlogID (BlogScrapTemp)
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: notion-scripts
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm install
+
+      - name: Run migration (BlogScrapTemp DB)
+        run: npm run migrate:blogid
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          MIGRATE_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID_BLOGSCARPTEMP }}
+          MIGRATE_LIMIT: 3000
