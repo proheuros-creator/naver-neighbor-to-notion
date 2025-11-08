@@ -1,0 +1,33 @@
+name: Naver BlogHome to Notion
+
+on:
+  schedule:
+    # 매일 18:00 UTC = 한국 새벽 3시
+    - cron: '0 18 * * *'
+  workflow_dispatch: {}  # 수동 실행 버튼
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    env:
+      NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+      NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      MAX_PAGE: 150
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run scraper
+        run: npm start
