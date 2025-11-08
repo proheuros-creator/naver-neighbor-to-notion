@@ -6,7 +6,7 @@ const databaseId = process.env.NOTION_DATABASE_ID;
 
 // 노션 속성 이름: 실제 DB의 컬럼명과 정확히 맞춰주세요
 const FORMULA_PROP_NAME = 'BlogID';        // 기존 blogId 수식 컬럼 (formula)
-const TEXT_PROP_NAME = 'BlogID_text';      // blogId 텍스트 컬럼 (text)
+const TEXT_PROP_NAME = 'ID';      // blogId 텍스트 컬럼 (text)
 const YEAR_PROP_NAME = '연도';             // 연도 (text)
 const YEARMONTH_PROP_NAME = '연월';        // 연월 (text)
 const QUARTER_PROP_NAME = '분기';          // 분기 (text)
@@ -78,7 +78,7 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID Formula → BlogID_text (비어 있을 때만)
+      // 1) BlogID Formula → ID (비어 있을 때만)
       if (props[FORMULA_PROP_NAME] && props[TEXT_PROP_NAME]) {
         const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
         const textProp = props[TEXT_PROP_NAME];
@@ -176,7 +176,7 @@ async function migrate() {
   }
 
   console.log(
-    `🎉 완료: 총 ${processed}행 / BlogID_text ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+    `🎉 완료: 총 ${processed}행 / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
   );
 }
 
