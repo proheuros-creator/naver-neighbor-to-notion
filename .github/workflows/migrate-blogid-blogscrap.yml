@@ -25,4 +25,4 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           MIGRATE_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID_BLOGSCARP }}
-          MIGRATE_LIMIT: 3000
+          MIGRATE_LIMIT: 5000
