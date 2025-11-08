@@ -2,20 +2,29 @@ import 'dotenv/config';
 import { Client } from '@notionhq/client';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
-const databaseId = process.env.NOTION_DATABASE_ID;
 
-// 노션 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID';   // formula
-const TEXT_PROP_NAME = 'ID';          // text
-const YEAR_PROP_NAME = '연도';        // text
-const YEARMONTH_PROP_NAME = '연월';   // text
-const QUARTER_PROP_NAME = '분기';     // text
-const DATE_PROP_NAME = '원본 날짜';    // date
+// MIGRATE_DATABASE_ID가 있으면 우선 사용, 없으면 기본 NOTION_DATABASE_ID
+const databaseId =
+  process.env.MIGRATE_DATABASE_ID || process.env.NOTION_DATABASE_ID;
 
 if (!databaseId) {
-  console.error('❌ NOTION_DATABASE_ID 가 없습니다.');
+  console.error(
+    '❌ 마이그레이션 대상 DB ID (MIGRATE_DATABASE_ID 또는 NOTION_DATABASE_ID)가 없습니다.'
+  );
   process.exit(1);
 }
+
+// 이번 실행에서 "실제로 업데이트할 최대 페이지 수"
+// 설정 안 하면(0 또는 undefined) 무제한
+const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
+
+// 노션 속성 이름들
+const FORMULA_PROP_NAME = 'BlogID';
+const TEXT_PROP_NAME = 'ID';
+const YEAR_PROP_NAME = '연도';
+const YEARMONTH_PROP_NAME = '연월';
+const QUARTER_PROP_NAME = '분기';
+const DATE_PROP_NAME = '원본 날짜';
 
 function extractFormulaValue(formulaProp) {
   if (!formulaProp || formulaProp.type !== 'formula') return null;
@@ -41,7 +50,7 @@ function extractYyYmQ(dateProp) {
   }
 
   const year = String(d.getFullYear());
-  const month = d.getMonth() + 1; // 1~12
+  const month = d.getMonth() + 1;
   const mm = String(month).padStart(2, '0');
   const yearMonth = `${year}-${mm}`;
 
@@ -51,12 +60,12 @@ function extractYyYmQ(dateProp) {
   else if (month <= 9) q = 'Q3';
   else q = 'Q4';
 
-  const quarter = `${year}-${q}`; // 예: 2025-Q1
+  const quarter = `${year}-${q}`;
 
   return { year, yearMonth, quarter };
 }
 
-// Notion 페이지 업데이트 재시도 헬퍼
+// Notion 업데이트 재시도 로직
 async function safeUpdatePage(pageId, properties, retries = 3) {
   let attempt = 0;
   while (true) {
@@ -69,13 +78,15 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
     } catch (err) {
       attempt++;
 
-      // 재시도 가능한 에러 유형
       const code = err.code || err.status || err.type;
+      const status = err.status;
       const message = err.message || '';
 
       const retriable =
         code === 'rate_limited' ||
         code === 'ECONNRESET' ||
+        code === 'service_unavailable' ||
+        status === 503 ||
         message.includes('socket hang up') ||
         message.includes('ECONNRESET');
 
@@ -83,37 +94,71 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
         throw err;
       }
 
-      // 간단한 backoff
-      const delayMs = 500 * attempt;
-      console.log(`⚠️ 업데이트 실패, 재시도 ${attempt}/${retries} (대상: ${pageId})`);
+      const delayMs = 1000 * attempt;
+      console.log(
+        `⚠️ Notion 업데이트 실패 (${code || status || 'unknown'}), 재시도 ${attempt}/${retries} (page: ${pageId})`
+      );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 }
 
 async function migrate() {
-  console.log('🚀 BlogID → ID + 연도/연월/분기 마이그레이션 시작');
+  console.log(
+    `🚀 BlogID → ID + 연도/연월/분기 마이그레이션 시작` +
+      (MIGRATE_LIMIT
+        ? ` (이번 실행 최대 ${MIGRATE_LIMIT}건 업데이트)`
+        : ' (업데이트 건수 제한 없음)')
+  );
 
   let cursor = undefined;
   let processed = 0;
+  let updatedPages = 0;
   let updatedBlogId = 0;
   let updatedYear = 0;
   let updatedYearMonth = 0;
   let updatedQuarter = 0;
 
-  while (true) {
+  // 아직 마이그레이션이 필요한 페이지만 조회
+  const baseFilter = {
+    or: [
+      {
+        property: TEXT_PROP_NAME,
+        rich_text: { is_empty: true },
+      },
+      {
+        property: YEAR_PROP_NAME,
+        rich_text: { is_empty: true },
+      },
+      {
+        property: YEARMONTH_PROP_NAME,
+        rich_text: { is_empty: true },
+      },
+      {
+        property: QUARTER_PROP_NAME,
+        rich_text: { is_empty: true },
+      },
+    ],
+  };
+
+  mainLoop: while (true) {
     const resp = await notion.databases.query({
       database_id: databaseId,
       start_cursor: cursor,
       page_size: 100,
+      filter: baseFilter,
     });
+
+    if (resp.results.length === 0) {
+      if (!resp.has_more) break;
+    }
 
     for (const page of resp.results) {
       processed++;
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID (formula) → ID (text)
+      // 1) BlogID formula → ID text
       if (props[FORMULA_PROP_NAME] && props[TEXT_PROP_NAME]) {
         const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
         const textProp = props[TEXT_PROP_NAME];
@@ -124,68 +169,46 @@ async function migrate() {
 
         if (formulaValue && !hasText) {
           updates[TEXT_PROP_NAME] = {
-            rich_text: [
-              {
-                text: { content: formulaValue },
-              },
-            ],
+            rich_text: [{ text: { content: formulaValue } }],
           };
           updatedBlogId++;
         }
       }
 
-      // 2) 원본 날짜 → 연도 / 연월 / 분기
+      // 2) 원본 날짜 → 연도/연월/분기
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
-        const yearProp = props[YEAR_PROP_NAME];
-        const hasYear =
-          yearProp.type === 'rich_text' &&
-          yearProp.rich_text.length > 0;
-
-        if (!hasYear) {
+        const p = props[YEAR_PROP_NAME];
+        const has =
+          p.type === 'rich_text' && p.rich_text.length > 0;
+        if (!has) {
           updates[YEAR_PROP_NAME] = {
-            rich_text: [
-              {
-                text: { content: year },
-              },
-            ],
+            rich_text: [{ text: { content: year } }],
           };
           updatedYear++;
         }
       }
 
       if (yearMonth && props[YEARMONTH_PROP_NAME]) {
-        const ymProp = props[YEARMONTH_PROP_NAME];
-        const hasYearMonth =
-          ymProp.type === 'rich_text' &&
-          ymProp.rich_text.length > 0;
-
-        if (!hasYearMonth) {
+        const p = props[YEARMONTH_PROP_NAME];
+        const has =
+          p.type === 'rich_text' && p.rich_text.length > 0;
+        if (!has) {
           updates[YEARMONTH_PROP_NAME] = {
-            rich_text: [
-              {
-                text: { content: yearMonth },
-              },
-            ],
+            rich_text: [{ text: { content: yearMonth } }],
           };
           updatedYearMonth++;
         }
       }
 
       if (quarter && props[QUARTER_PROP_NAME]) {
-        const qProp = props[QUARTER_PROP_NAME];
-        const hasQuarter =
-          qProp.type === 'rich_text' &&
-          qProp.rich_text.length > 0;
-
-        if (!hasQuarter) {
+        const p = props[QUARTER_PROP_NAME];
+        const has =
+          p.type === 'rich_text' && p.rich_text.length > 0;
+        if (!has) {
           updates[QUARTER_PROP_NAME] = {
-            rich_text: [
-              {
-                text: { content: quarter },
-              },
-            ],
+            rich_text: [{ text: { content: quarter } }],
           };
           updatedQuarter++;
         }
@@ -193,21 +216,34 @@ async function migrate() {
 
       if (Object.keys(updates).length > 0) {
         await safeUpdatePage(page.id, updates);
-      }
+        await new Promise((resolve) => setTimeout(resolve, 50)); // 부하 완화용
 
-      if (processed % 500 === 0) {
-        console.log(
-          `📊 처리 ${processed}행 / BlogID→ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
-        );
+        updatedPages++;
+
+        if (processed % 500 === 0) {
+          console.log(
+            `📊 처리 ${processed}행 / 업데이트된 페이지 ${updatedPages} / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+          );
+        }
+
+        // 🔚 이번 실행 상한 도달 시 종료
+        if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
+          console.log(
+            `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달, 이번 실행 종료`
+          );
+          break mainLoop;
+        }
       }
     }
 
-    if (!resp.has_more) break;
+    if (!resp.has_more) {
+      break;
+    }
     cursor = resp.next_cursor;
   }
 
   console.log(
-    `🎉 완료: 총 ${processed}행 / BlogID→ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+    `🎉 마이그레이션 종료: 처리 ${processed}행 / 업데이트된 페이지 ${updatedPages} / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
   );
 }
 
