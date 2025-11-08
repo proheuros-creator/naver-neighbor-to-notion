@@ -1,187 +1,261 @@
-import 'dotenv/config';
-import fetch from 'node-fetch';
-import { upsertPost } from './notion.js';
+/**
+ * notion.js
+ * ──────────────────────────────────────
+ * Naver 이웃새글 포스트를 Notion DB에 upsert 하는 모듈
+ *
+ * index.js 에서 넘겨주는 post 객체 형태:
+ * {
+ *   title,
+ *   link,
+ *   nickname,
+ *   pubdate,
+ *   description,
+ *   category,
+ *   blogId,
+ *   postId
+ * }
+ *
+ * Notion DB에 필요한 속성:
+ *  - Title      : title 타입
+ *  - URL        : url 타입
+ *  - Nickname   : rich_text
+ *  - 원본 날짜    : date
+ *  - 생성 일시    : date
+ *  - Category   : rich_text
+ *  - Description: rich_text
+ *  - UniqueID   : rich_text  (blogId_postId)
+ *  - ID         : rich_text  (blogId)
+ *  - 연도        : rich_text
+ *  - 연월        : rich_text
+ *  - 분기        : rich_text
+ */
 
-const NAVER_COOKIE = process.env.NAVER_COOKIE;
-const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
-const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
+import { Client } from '@notionhq/client';
 
-if (!NAVER_COOKIE) {
-  console.error('❌ NAVER_COOKIE 가 설정되어 있지 않습니다.');
+const notion = new Client({ auth: process.env.NOTION_API_KEY });
+const databaseId = process.env.NOTION_DATABASE_ID;
+
+if (!databaseId) {
+  console.error('❌ NOTION_DATABASE_ID 가 설정되어 있지 않습니다.');
   process.exit(1);
 }
 
-if (!API_TEMPLATE) {
-  console.error('❌ NAVER_NEIGHBOR_API_URL 이 설정되어 있지 않습니다.');
-  process.exit(1);
-}
+/**
+ * 네이버 pubdate 값을 Notion이 이해할 수 있는 ISO 문자열로 변환
+ */
+function normalizeNaverDate(raw) {
+  if (!raw) return null;
 
-// page=1 이 들어있는 BuddyPostList URL을 기반으로 page만 바꿔서 사용
-function buildPageUrl(page) {
-  try {
-    const url = new URL(API_TEMPLATE);
-    url.searchParams.set('page', String(page));
-    return url.toString();
-  } catch (e) {
-    // 혹시 URL 생성 실패 시 대체 (단순 치환)
-    return API_TEMPLATE.replace(/page=\d+/, `page=${page}`);
+  // 숫자 (타임스탬프)인 경우
+  if (typeof raw === 'number') {
+    return new Date(raw).toISOString();
   }
+
+  const s = String(raw).trim();
+
+  // 13자리 밀리초 타임스탬프
+  if (/^\d{13}$/.test(s)) {
+    return new Date(Number(s)).toISOString();
+  }
+
+  // 10자리 초 타임스탬프
+  if (/^\d{10}$/.test(s)) {
+    return new Date(Number(s) * 1000).toISOString();
+  }
+
+  // "2025.11.09 08:00", "2025/11/09", "2025년11월9일" 등 대충 포맷 정리
+  const replaced = s
+    .replace(/\./g, '-')
+    .replace(/\//g, '-')
+    .replace(/년|\. /g, '-')
+    .replace(/월/g, '-')
+    .replace(/일/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const d = new Date(replaced);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString();
+  }
+
+  return null;
 }
 
-// 네이버가 응답 앞에 붙이는 ")]}'," 같은 prefix 제거
-function stripNaverPrefix(raw) {
-  return raw.replace(/^\)\]\}',?\s*/, '');
+/**
+ * ISO 날짜 문자열에서 연도 / 연월 / 분기 추출
+ */
+function extractYearMonthQuarter(isoString) {
+  if (!isoString) {
+    return { year: '', yearMonth: '', quarter: '' };
+  }
+
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) {
+    return { year: '', yearMonth: '', quarter: '' };
+  }
+
+  const year = String(d.getFullYear());
+  const month = d.getMonth() + 1;
+  const mm = String(month).padStart(2, '0');
+  const yearMonth = `${year}-${mm}`;
+
+  let q;
+  if (month <= 3) q = 'Q1';
+  else if (month <= 6) q = 'Q2';
+  else if (month <= 9) q = 'Q3';
+  else q = 'Q4';
+
+  const quarter = `${year}-${q}`;
+
+  return { year, yearMonth, quarter };
 }
 
-// 디버깅용: JSON 파싱 실패 시 raw 앞부분만 출력
-function cleanedPreview(raw) {
-  const cleaned = stripNaverPrefix(raw || '');
-  return cleaned.slice(0, 120) + (cleaned.length > 120 ? '...' : '');
-}
+/**
+ * post를 Notion DB에 upsert
+ */
+export async function upsertPost(post) {
+  const blogId = post.blogId ? String(post.blogId) : '';
+  const postId = post.postId ? String(post.postId) : '';
 
-async function fetchPagePosts(page) {
-  const url = buildPageUrl(page);
+  // ✅ UniqueID: blogId_postId 조합 (index.js에서 postId 필터하므로 거의 항상 존재)
+  const uniqueId =
+    blogId && postId
+      ? `${blogId}_${postId}`
+      : postId || '';
 
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (NaverNeighborScraper)',
-      'Cookie': NAVER_COOKIE,
-      'Accept': 'application/json, text/plain, */*',
-      'Referer': 'https://section.blog.naver.com/BlogHome.naver',
+  if (!uniqueId) {
+    console.warn('⚠️ UniqueID 없음, 스킵:', post.title);
+    return;
+  }
+
+  // 1️⃣ UniqueID 기준 기존 페이지 조회
+  let existing = null;
+  try {
+    const query = await notion.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: 'UniqueID',
+        rich_text: {
+          equals: uniqueId,
+        },
+      },
+    });
+    existing = query.results[0] || null;
+  } catch (err) {
+    console.error('❌ Notion 조회 오류(UniqueID):', err.message);
+  }
+
+  // 2️⃣ 날짜 처리
+  const originalDate = normalizeNaverDate(post.pubdate);
+  const createdAt = new Date().toISOString();
+  const { year, yearMonth, quarter } = extractYearMonthQuarter(originalDate);
+
+  // 3️⃣ Notion 속성 매핑
+  const properties = {
+    Title: {
+      title: [
+        {
+          text: {
+            content: post.title || '(제목 없음)',
+          },
+        },
+      ],
     },
-  });
+    URL: {
+      url: post.link || null,
+    },
+    Nickname: {
+      rich_text: [
+        {
+          text: {
+            content: post.nickname || '',
+          },
+        },
+      ],
+    },
+    ...(originalDate && {
+      '원본 날짜': {
+        date: { start: originalDate },
+      },
+    }),
+    '생성 일시': {
+      date: { start: createdAt },
+    },
+    Category: {
+      rich_text: [
+        {
+          text: { content: post.category || '' },
+        },
+      ],
+    },
+    Description: {
+      rich_text: [
+        {
+          text: {
+            content: (post.description || '').slice(0, 1800),
+          },
+        },
+      ],
+    },
+    UniqueID: {
+      rich_text: [
+        {
+          text: { content: uniqueId },
+        },
+      ],
+    },
+    // ✅ blogId → ID 컬럼 (대문자)
+    ...(blogId && {
+      ID: {
+        rich_text: [
+          {
+            text: { content: blogId },
+          },
+        ],
+      },
+    }),
+    // ✅ 연도 / 연월 / 분기
+    ...(year && {
+      연도: {
+        rich_text: [
+          {
+            text: { content: year },
+          },
+        ],
+      },
+    }),
+    ...(yearMonth && {
+      연월: {
+        rich_text: [
+          {
+            text: { content: yearMonth },
+          },
+        ],
+      },
+    }),
+    ...(quarter && {
+      분기: {
+        rich_text: [
+          {
+            text: { content: quarter },
+          },
+        ],
+      },
+    }),
+  };
 
-  if (!res.ok) {
-    console.error(`❌ ${page}페이지 API 요청 실패:`, res.status, res.statusText);
-    return [];
+  // 4️⃣ upsert
+  if (existing) {
+    await notion.pages.update({
+      page_id: existing.id,
+      properties,
+    });
+    console.log(`🔄 업데이트: ${post.title}`);
+  } else {
+    await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties,
+    });
+    console.log(`🆕 새 글 추가: ${post.title}`);
   }
-
-  const raw = await res.text();
-
-  let data;
-  try {
-    const cleaned = stripNaverPrefix(raw);
-    data = JSON.parse(cleaned);
-  } catch (e) {
-    console.error(`❌ ${page}페이지 JSON 파싱 실패:`, e.message);
-    console.error(cleanedPreview(raw));
-    return [];
-  }
-
-  // BuddyPostList 구조 대응
-  const result = data.result || data;
-  const list =
-    result.buddyPostList ||
-    result.postList ||
-    result.list ||
-    result.items ||
-    [];
-
-  const posts = list
-    .map((item) => {
-      const title = item.title || item.postTitle || '';
-      const blogId =
-        item.blogId ||
-        item.blogNo ||
-        item.bloggerId ||
-        '';
-      const logNo =
-        item.logNo ||
-        item.postId ||
-        item.articleId ||
-        '';
-
-      // ✅ URL: 응답 필드 사용 + blogId/logNo 조합 fallback
-      const link =
-        item.url ||
-        item.postUrl ||
-        item.blogPostUrl ||
-        (blogId && logNo
-          ? `https://blog.naver.com/${blogId}/${logNo}`
-          : '');
-
-      const nickname =
-        item.nickName ||
-        item.bloggerName ||
-        item.userName ||
-        '';
-
-      const pubdate =
-        item.addDate ||
-        item.postDate ||
-        item.writeDate ||
-        item.regDate ||
-        item.createdAt ||
-        null;
-
-      // ✅ Description: 어제 코드와 동일하게 여러 후보 사용
-      const description =
-        item.briefContents ||
-        item.summary ||
-        item.contentsPreview ||
-        item.previewText ||
-        item.contents ||
-        '';
-
-      const category =
-        item.categoryName ||
-        item.directoryName ||
-        item.category ||
-        '';
-
-      const postId = logNo || '';
-
-      // URL 또는 postId 없으면 스킵 (UniqueID 위해)
-      if (!title || !link || !postId) return null;
-
-      return {
-        title,
-        link,
-        nickname,
-        pubdate,
-        description,
-        category,
-        blogId,
-        postId,
-      };
-    })
-    .filter(Boolean);
-
-  // ✅ 페이지 내: "맨 아래 글 → 맨 위 글" 순서로 (최신 순으로 맞추기)
-  return posts.reverse();
 }
-
-async function main() {
-  console.log('🚀 BuddyPostList API → Notion 스크랩 시작');
-  console.log(`📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순, 각 페이지는 역순 수집)`);
-
-  let total = 0;
-
-  // 🔽 MAX_PAGE부터 1까지 역순 스크랩
-  for (let page = MAX_PAGE; page >= 1; page--) {
-    const posts = await fetchPagePosts(page);
-    console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
-    total += posts.length;
-
-    for (const post of posts) {
-      try {
-        await upsertPost(post);
-      } catch (err) {
-        console.error('❌ Notion 저장 오류:', err.message);
-      }
-
-      // Notion API 부하 완화 (글당 0.3s)
-      await new Promise((r) => setTimeout(r, 300));
-    }
-
-    // 페이지 간 1초 대기
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-
-  console.log(`✅ 전체 스크랩 완료. 총 ${total}건 처리 시도.`);
-}
-
-main().catch((err) => {
-  console.error('❌ 스크립트 전체 오류:', err);
-  process.exit(1);
-});
