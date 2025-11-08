@@ -33,3 +33,5 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           MAX_PAGE: ${{ secrets.MAX_PAGE }}
+          NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
+
