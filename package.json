@@ -1,6 +1,7 @@
 {
   "name": "naver-bloghome-to-notion",
   "version": "1.0.0",
+  "description": "Automatically scrape Naver Blog Neighbor Posts and sync them to Notion Database.",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -8,9 +9,14 @@
     "migrate:blogid": "node migrate-blogid.js"
   },
   "dependencies": {
-    "@notionhq/client": "^2.2.14",
-    "cheerio": "^1.0.0-rc.12",
+    "@notionhq/client": "^2.2.15",
+    "axios": "^1.7.0",
     "dotenv": "^16.4.5",
     "node-fetch": "^3.3.2"
-  }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "서휘원 (Minho Jeon)",
+  "license": "MIT"
 }
