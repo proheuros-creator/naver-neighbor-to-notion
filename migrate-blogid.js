@@ -4,13 +4,13 @@ import { Client } from '@notionhq/client';
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const databaseId = process.env.NOTION_DATABASE_ID;
 
-// 노션 속성 이름: 실제 DB의 컬럼명과 정확히 맞춰주세요
-const FORMULA_PROP_NAME = 'BlogID';        // 기존 blogId 수식 컬럼 (formula)
-const TEXT_PROP_NAME = 'ID';      // blogId 텍스트 컬럼 (text)
-const YEAR_PROP_NAME = '연도';             // 연도 (text)
-const YEARMONTH_PROP_NAME = '연월';        // 연월 (text)
-const QUARTER_PROP_NAME = '분기';          // 분기 (text)
-const DATE_PROP_NAME = '원본 날짜';        // 기준 날짜 (date)
+// 노션 속성 이름들
+const FORMULA_PROP_NAME = 'BlogID';   // formula
+const TEXT_PROP_NAME = 'ID';          // text
+const YEAR_PROP_NAME = '연도';        // text
+const YEARMONTH_PROP_NAME = '연월';   // text
+const QUARTER_PROP_NAME = '분기';     // text
+const DATE_PROP_NAME = '원본 날짜';    // date
 
 if (!databaseId) {
   console.error('❌ NOTION_DATABASE_ID 가 없습니다.');
@@ -46,9 +46,9 @@ function extractYyYmQ(dateProp) {
   const yearMonth = `${year}-${mm}`;
 
   let q;
-  if (month >= 1 && month <= 3) q = 'Q1';
-  else if (month >= 4 && month <= 6) q = 'Q2';
-  else if (month >= 7 && month <= 9) q = 'Q3';
+  if (month <= 3) q = 'Q1';
+  else if (month <= 6) q = 'Q2';
+  else if (month <= 9) q = 'Q3';
   else q = 'Q4';
 
   const quarter = `${year}-${q}`; // 예: 2025-Q1
@@ -56,8 +56,43 @@ function extractYyYmQ(dateProp) {
   return { year, yearMonth, quarter };
 }
 
+// Notion 페이지 업데이트 재시도 헬퍼
+async function safeUpdatePage(pageId, properties, retries = 3) {
+  let attempt = 0;
+  while (true) {
+    try {
+      await notion.pages.update({
+        page_id: pageId,
+        properties,
+      });
+      return;
+    } catch (err) {
+      attempt++;
+
+      // 재시도 가능한 에러 유형
+      const code = err.code || err.status || err.type;
+      const message = err.message || '';
+
+      const retriable =
+        code === 'rate_limited' ||
+        code === 'ECONNRESET' ||
+        message.includes('socket hang up') ||
+        message.includes('ECONNRESET');
+
+      if (!retriable || attempt >= retries) {
+        throw err;
+      }
+
+      // 간단한 backoff
+      const delayMs = 500 * attempt;
+      console.log(`⚠️ 업데이트 실패, 재시도 ${attempt}/${retries} (대상: ${pageId})`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function migrate() {
-  console.log('🚀 BlogID + 연도/연월/분기 마이그레이션 시작');
+  console.log('🚀 BlogID → ID + 연도/연월/분기 마이그레이션 시작');
 
   let cursor = undefined;
   let processed = 0;
@@ -78,7 +113,7 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID Formula → ID (비어 있을 때만)
+      // 1) BlogID (formula) → ID (text)
       if (props[FORMULA_PROP_NAME] && props[TEXT_PROP_NAME]) {
         const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
         const textProp = props[TEXT_PROP_NAME];
@@ -99,7 +134,7 @@ async function migrate() {
         }
       }
 
-      // 2) 원본 날짜 → 연도 / 연월 / 분기 (비어 있을 때만)
+      // 2) 원본 날짜 → 연도 / 연월 / 분기
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
@@ -156,17 +191,13 @@ async function migrate() {
         }
       }
 
-      // 3) 업데이트 실행
       if (Object.keys(updates).length > 0) {
-        await notion.pages.update({
-          page_id: page.id,
-          properties: updates,
-        });
+        await safeUpdatePage(page.id, updates);
       }
 
       if (processed % 500 === 0) {
         console.log(
-          `📊 처리 ${processed}행 / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+          `📊 처리 ${processed}행 / BlogID→ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
         );
       }
     }
@@ -176,7 +207,7 @@ async function migrate() {
   }
 
   console.log(
-    `🎉 완료: 총 ${processed}행 / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+    `🎉 완료: 총 ${processed}행 / BlogID→ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
   );
 }
 
