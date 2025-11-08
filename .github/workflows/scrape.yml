@@ -2,17 +2,16 @@ name: Naver BlogHome to Notion
 
 on:
   schedule:
-    # 매일 18:00 UTC = 한국시간 새벽 3시
+    # 매일 18:00 UTC = 한국 새벽 3시
     - cron: '0 18 * * *'
-  workflow_dispatch: {} # 수동 실행 버튼
-
-concurrency:
-  group: notion-scripts
-  cancel-in-progress: false
+  workflow_dispatch: {}  # 수동 실행 가능
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    concurrency:
+      group: bloghome-scrape
+      cancel-in-progress: false
 
     steps:
       - name: Checkout repo
@@ -30,8 +29,7 @@ jobs:
         run: npm start
         env:
           NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+          NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          MAX_PAGE: ${{ secrets.MAX_PAGE }}
-          NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
-
+          MAX_PAGE: 150  # ← 여기 숫자만 바꾸면 전체 순회 범위 조정 가능
