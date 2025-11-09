@@ -10,6 +10,7 @@ concurrency:
 jobs:
   migrate:
     runs-on: ubuntu-latest
+    timeout-minutes: 720  # (선택) 최대 실행시간 제한
 
     steps:
       - uses: actions/checkout@v4
