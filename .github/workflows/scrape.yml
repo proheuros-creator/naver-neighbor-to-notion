@@ -31,7 +31,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # (선택) 최대 실행시간 제한
+    timeout-minutes: 720  # (선택) 최대 실행시간 제한
 
     # 🚧 concurrency 설정 (중복 실행 방지)
     concurrency:
