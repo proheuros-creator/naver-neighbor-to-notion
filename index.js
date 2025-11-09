@@ -5,17 +5,10 @@
  * 
  * ✅ 주요 기능:
  *  - NAVER_NEIGHBOR_API_URL 기반으로 BuddyPostList를 반복 요청하여 글 목록 수집
- *  - 150페이지 → 1페이지까지 역순(최신글 우선) 스크랩
- *  - 각 페이지에서도 최신 순(하단 → 상단)으로 정렬
+ *  - 150페이지 → 1페이지까지 역순(최신 페이지 우선) 스크랩
+ *  - 각 페이지 내 글은 “아래 → 위” 순서로 처리 (오래된 글 → 최신 글)
  *  - postId + blogId 조합으로 Notion 중복 등록 방지
  *  - Notion 데이터베이스에 글 정보를 자동 저장
- * 
- * ⚙️ 필요한 환경변수 (.env 또는 GitHub Secrets)
- *  - NAVER_COOKIE : 로그인 세션 쿠키 (JSESSIONID 포함)
- *  - NAVER_NEIGHBOR_API_URL : BuddyPostList API 기본 URL (예: https://section.blog.naver.com/ajax/BuddyPostList.naver?page=1&groupId=0)
- *  - NOTION_API_KEY : 노션 API 키
- *  - NOTION_DATABASE_ID : 노션 데이터베이스 ID
- *  - MAX_PAGE : 스크랩할 마지막 페이지 번호 (예: 150)
  */
 
 import 'dotenv/config';
@@ -117,7 +110,7 @@ async function fetchPagePosts(page) {
     [];
 
   // 필요한 필드만 추출
-  const posts = list
+  let posts = list
     .map((item) => {
       const title = item.title || item.postTitle || '';
       const blogId =
@@ -185,6 +178,13 @@ async function fetchPagePosts(page) {
     })
     .filter(Boolean);
 
+  /**
+   * ✅ 순서 조정:
+   *   - 네이버 응답은 보통 “최신글 → 오래된 글” 순으로 정렬됨.
+   *   - 우리가 원하는 것은 “아래 → 위” 즉, “오래된 글 → 최신글” 순서이므로 reverse().
+   */
+  posts = posts.reverse();
+
   return { posts };
 }
 
@@ -195,7 +195,7 @@ async function fetchPagePosts(page) {
  */
 async function main() {
   console.log('🚀 BuddyPostList API → Notion 스크랩 시작');
-  console.log(`📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순)`);
+  console.log(`📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순, 각 페이지는 아래→위 순서)`);
 
   let total = 0;
 
@@ -204,17 +204,27 @@ async function main() {
     console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
     total += posts.length;
 
+    // 오래된 글부터 최신 글 순으로 업서트
     for (const post of posts) {
       try {
         await upsertPost(post); // 노션에 저장 또는 업데이트
       } catch (err) {
         console.error('❌ Notion 저장 오류:', err.message);
       }
+
+      // 요청 간 약간의 딜레이 추가 (API 부하 완화)
+      await new Promise((r) => setTimeout(r, 300));
     }
+
+    // 페이지 간 간격 (1초)
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
   console.log(`✅ 전체 스크랩 완료. 총 ${total}건 처리 시도.`);
 }
 
 // 메인 실행
-main();
+main().catch((err) => {
+  console.error('❌ 스크립트 전체 오류:', err);
+  process.exit(1);
+});
