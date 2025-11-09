@@ -1,37 +1,18 @@
 /**
  * notion.js
- * ──────────────────────────────────────
- * Naver 이웃새글 포스트를 Notion DB에 upsert 하는 모듈
+ * ───────────────────────────────────────────────
+ * 🧩 네이버 이웃새글 → Notion DB 업서트 모듈
  *
- * index.js 에서 넘겨주는 post 객체 형태:
- * {
- *   title,
- *   link,
- *   nickname,
- *   pubdate,
- *   description,
- *   category,
- *   blogId,
- *   postId
- * }
- *
- * Notion DB에 필요한 속성:
- *  - Title      : title 타입
- *  - URL        : url 타입
- *  - Nickname   : rich_text
- *  - 원본 날짜    : date
- *  - 생성 일시    : date
- *  - Category   : rich_text
- *  - Description: rich_text
- *  - UniqueID   : rich_text  (blogId_postId)
- *  - ID         : rich_text  (blogId)
- *  - 연도        : rich_text
- *  - 연월        : rich_text
- *  - 분기        : rich_text
+ * ✅ 주요 기능:
+ *  - UniqueID(blogId_postId)로 중복 등록 방지
+ *  - pubdate로부터 연도/연월/분기 추출 및 저장
+ *  - blogId를 ID 컬럼에 저장
+ *  - 기존 글이면 update, 없으면 create
  */
 
 import { Client } from '@notionhq/client';
 
+// 노션 API 클라이언트 초기화
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const databaseId = process.env.NOTION_DATABASE_ID;
 
@@ -41,12 +22,12 @@ if (!databaseId) {
 }
 
 /**
- * 네이버 pubdate 값을 Notion이 이해할 수 있는 ISO 문자열로 변환
+ * 🕒 pubdate를 ISO 포맷으로 변환
+ *  - 숫자(타임스탬프) 또는 문자열 날짜 모두 처리
  */
 function normalizeNaverDate(raw) {
   if (!raw) return null;
 
-  // 숫자 (타임스탬프)인 경우
   if (typeof raw === 'number') {
     return new Date(raw).toISOString();
   }
@@ -54,82 +35,65 @@ function normalizeNaverDate(raw) {
   const s = String(raw).trim();
 
   // 13자리 밀리초 타임스탬프
-  if (/^\d{13}$/.test(s)) {
-    return new Date(Number(s)).toISOString();
-  }
+  if (/^\d{13}$/.test(s)) return new Date(Number(s)).toISOString();
 
-  // 10자리 초 타임스탬프
-  if (/^\d{10}$/.test(s)) {
-    return new Date(Number(s) * 1000).toISOString();
-  }
+  // 10자리 초 단위 타임스탬프
+  if (/^\d{10}$/.test(s)) return new Date(Number(s) * 1000).toISOString();
 
-  // "2025.11.09 08:00", "2025/11/09", "2025년11월9일" 등 대충 포맷 정리
+  // 일반적인 문자열 날짜 포맷 보정
   const replaced = s
     .replace(/\./g, '-')
     .replace(/\//g, '-')
-    .replace(/년|\. /g, '-')
-    .replace(/월/g, '-')
-    .replace(/일/g, '')
-    .replace(/\s+/g, ' ')
+    .replace('년', '-')
+    .replace('월', '-')
+    .replace('일', '')
     .trim();
 
   const d = new Date(replaced);
-  if (!isNaN(d.getTime())) {
-    return d.toISOString();
-  }
-
-  return null;
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 /**
- * ISO 날짜 문자열에서 연도 / 연월 / 분기 추출
+ * 📅 ISO 날짜에서 연/연월/분기 텍스트 추출
  */
 function extractYearMonthQuarter(isoString) {
-  if (!isoString) {
-    return { year: '', yearMonth: '', quarter: '' };
-  }
+  if (!isoString) return { year: '', yearMonth: '', quarter: '' };
 
   const d = new Date(isoString);
-  if (isNaN(d.getTime())) {
-    return { year: '', yearMonth: '', quarter: '' };
-  }
+  if (isNaN(d.getTime())) return { year: '', yearMonth: '', quarter: '' };
 
   const year = String(d.getFullYear());
   const month = d.getMonth() + 1;
   const mm = String(month).padStart(2, '0');
   const yearMonth = `${year}-${mm}`;
 
-  let q;
-  if (month <= 3) q = 'Q1';
-  else if (month <= 6) q = 'Q2';
-  else if (month <= 9) q = 'Q3';
-  else q = 'Q4';
-
+  // 분기 계산
+  const q = month <= 3 ? 'Q1' : month <= 6 ? 'Q2' : month <= 9 ? 'Q3' : 'Q4';
   const quarter = `${year}-${q}`;
 
   return { year, yearMonth, quarter };
 }
 
 /**
- * post를 Notion DB에 upsert
+ * 💾 post 데이터를 Notion DB에 업서트 (있으면 업데이트, 없으면 생성)
  */
 export async function upsertPost(post) {
   const blogId = post.blogId ? String(post.blogId) : '';
   const postId = post.postId ? String(post.postId) : '';
 
-  // ✅ UniqueID: blogId_postId 조합 (index.js에서 postId 필터하므로 거의 항상 존재)
+  // UniqueID = blogId_postId 조합
   const uniqueId =
     blogId && postId
       ? `${blogId}_${postId}`
-      : postId || '';
+      : postId || null;
 
   if (!uniqueId) {
     console.warn('⚠️ UniqueID 없음, 스킵:', post.title);
     return;
   }
 
-  // 1️⃣ UniqueID 기준 기존 페이지 조회
-  let existing = null;
+  // 1️⃣ UniqueID 기준 중복 여부 확인
+  let existing;
   try {
     const query = await notion.databases.query({
       database_id: databaseId,
@@ -140,24 +104,22 @@ export async function upsertPost(post) {
         },
       },
     });
-    existing = query.results[0] || null;
+    existing = query.results?.[0];
   } catch (err) {
-    console.error('❌ Notion 조회 오류(UniqueID):', err.message);
+    console.error('❌ Notion 조회 오류:', err.message);
   }
 
-  // 2️⃣ 날짜 처리
+  // 2️⃣ 날짜 변환 및 분기 추출
   const originalDate = normalizeNaverDate(post.pubdate);
   const createdAt = new Date().toISOString();
   const { year, yearMonth, quarter } = extractYearMonthQuarter(originalDate);
 
-  // 3️⃣ Notion 속성 매핑
+  // 3️⃣ 노션 속성 매핑
   const properties = {
     Title: {
       title: [
         {
-          text: {
-            content: post.title || '(제목 없음)',
-          },
+          text: { content: post.title || '(제목 없음)' },
         },
       ],
     },
@@ -165,13 +127,7 @@ export async function upsertPost(post) {
       url: post.link || null,
     },
     Nickname: {
-      rich_text: [
-        {
-          text: {
-            content: post.nickname || '',
-          },
-        },
-      ],
+      rich_text: [{ text: { content: post.nickname || '' } }],
     },
     ...(originalDate && {
       '원본 날짜': {
@@ -182,69 +138,45 @@ export async function upsertPost(post) {
       date: { start: createdAt },
     },
     Category: {
-      rich_text: [
-        {
-          text: { content: post.category || '' },
-        },
-      ],
+      rich_text: [{ text: { content: post.category || '' } }],
     },
     Description: {
       rich_text: [
         {
           text: {
-            content: (post.description || '').slice(0, 1800),
+            content: (post.description || '').slice(0, 1800), // 노션 제한 고려
           },
         },
       ],
     },
     UniqueID: {
-      rich_text: [
-        {
-          text: { content: uniqueId },
-        },
-      ],
+      rich_text: [{ text: { content: uniqueId } }],
     },
     // ✅ blogId → ID 컬럼 (대문자)
     ...(blogId && {
       ID: {
-        rich_text: [
-          {
-            text: { content: blogId },
-          },
-        ],
+        rich_text: [{ text: { content: blogId } }],
       },
     }),
-    // ✅ 연도 / 연월 / 분기
+    // ✅ 연도 / 연월 / 분기 컬럼 추가
     ...(year && {
       연도: {
-        rich_text: [
-          {
-            text: { content: year },
-          },
-        ],
+        rich_text: [{ text: { content: year } }],
       },
     }),
     ...(yearMonth && {
       연월: {
-        rich_text: [
-          {
-            text: { content: yearMonth },
-          },
-        ],
+        rich_text: [{ text: { content: yearMonth } }],
       },
     }),
     ...(quarter && {
       분기: {
-        rich_text: [
-          {
-            text: { content: quarter },
-          },
-        ],
+        rich_text: [{ text: { content: quarter } }],
       },
     }),
   };
 
-  // 4️⃣ upsert
+  // 4️⃣ 업서트 수행
   if (existing) {
     await notion.pages.update({
       page_id: existing.id,
