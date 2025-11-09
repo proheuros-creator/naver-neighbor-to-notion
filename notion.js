@@ -10,7 +10,8 @@
  *  - 기존 글이면 update, 없으면 create
  *  - 기존 내용이 동일하면 update 생략 (⏩ 변경 없음)
  *  - Description 필드는 비교 제외 → 불필요한 update 방지
- *  - ⚙️ 조회 타임아웃 발생 시 3회 재시도 후 스킵
+ *  - ⚙️ 조회 타임아웃 발생 시 3회 재시도
+ *    → 실패해도 "누락 방지 우선": 새 페이지 생성 시도 (중복 가능성 허용)
  */
 
 import { Client } from "@notionhq/client";
@@ -69,6 +70,8 @@ function extractYearMonthQuarter(isoString) {
 
 // ───────────────────────────────────────────────
 // 🔁 Notion 조회 재시도 함수 (최대 3회)
+//   - 성공: 페이지 객체 또는 null(미존재)
+//   - 최종 실패: undefined 반환 → 새로 생성 시도 (중복 가능성 허용)
 // ───────────────────────────────────────────────
 async function findExistingPageWithRetry(uniqueId, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -80,6 +83,7 @@ async function findExistingPageWithRetry(uniqueId, retries = 3) {
           rich_text: { equals: uniqueId },
         },
       });
+      // 존재하면 Page 객체, 없으면 null
       return query.results?.[0] || null;
     } catch (err) {
       const msg = err.code || err.message || String(err);
@@ -87,14 +91,16 @@ async function findExistingPageWithRetry(uniqueId, retries = 3) {
         `⚠️ Notion 조회 실패 (${attempt}/${retries}) [${uniqueId}]: ${msg}`
       );
 
-      // 타임아웃/네트워크 지연 시 잠시 대기 후 재시도
       if (attempt < retries) {
-        const delay = 1000 * attempt; // 1초, 2초, 3초 점증 대기
+        const delay = 1000 * attempt; // 1s → 2s → 3s
         console.log(`⏳ ${delay / 1000}s 후 재시도합니다...`);
         await new Promise((r) => setTimeout(r, delay));
       } else {
-        console.error(`❌ Notion 조회 포기: ${uniqueId} (이 글은 스킵됩니다)`);
-        return null;
+        console.error(
+          `❌ Notion 조회 최종 실패: ${uniqueId} (중복 가능성을 감수하고 새로 생성 예정)`
+        );
+        // ⬇️ 조회 실패는 undefined로 반환 → 아래 upsert에서 "새로 생성" 경로로 처리
+        return undefined;
       }
     }
   }
@@ -116,9 +122,15 @@ export async function upsertPost(post) {
 
   // ── 1️⃣ 기존 데이터 조회 (재시도 포함)
   const existing = await findExistingPageWithRetry(uniqueId);
-  if (existing === null && existing !== undefined) {
-    console.warn(`⏭️ Notion 조회 실패로 스킵: ${post.title}`);
-    return;
+  // existing 의미:
+  //   - Page 객체: 이미 있음 → update or skip
+  //   - null: 정상 조회, 기존 페이지 없음 → 새로 생성
+  //   - undefined: 조회 실패 → 새로 생성 시도 (중복 가능성 허용)
+
+  if (existing === undefined) {
+    console.warn(
+      `⚠️ [${uniqueId}] Notion 조회에 최종 실패했지만, 누락 방지를 위해 새 페이지를 생성합니다. (중복 가능성 있음)`
+    );
   }
 
   // ── 2️⃣ 날짜 변환
@@ -152,7 +164,7 @@ export async function upsertPost(post) {
   if (existing) {
     const old = existing.properties;
 
-    // 주요 필드 비교 (Description은 제외)
+    // 주요 필드 비교 (Description 제외)
     const oldTitle = old.Title?.title?.[0]?.plain_text || "";
     const oldUrl = old.URL?.url || "";
     const oldCat = old.Category?.rich_text?.[0]?.plain_text || "";
@@ -173,6 +185,7 @@ export async function upsertPost(post) {
     });
     console.log(`🔄 업데이트: ${post.title}`);
   } else {
+    // existing === null (정상, 미존재) or undefined(조회 실패) → 새 페이지 생성
     await notion.pages.create({
       parent: { database_id: databaseId },
       properties,
