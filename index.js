@@ -18,7 +18,7 @@ import { upsertPost } from './notion.js';
 // 환경변수 로드
 const NAVER_COOKIE = process.env.NAVER_COOKIE;
 const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
-const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
+const MAX_PAGE = Number(process.env.MAX_PAGE || 130);
 
 // 필수 환경변수 확인
 if (!NAVER_COOKIE) {
