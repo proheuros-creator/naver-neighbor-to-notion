@@ -1,11 +1,12 @@
 # ───────────────────────────────────────────────
 # 🧭 Naver BlogHome → Notion 자동 스크랩 워크플로우
-# 
+#
 # ✅ 주요 기능:
 #   - 매일 한국시간 새벽 3시에 자동 실행
 #   - 또는 GitHub Actions → "Run workflow" 버튼으로 수동 실행 가능
 #   - Node.js 환경에서 index.js 실행 → notion.js와 연동
-# 
+#   - concurrency 설정으로 스크랩 중복 실행 방지
+#
 # ⚙️ 사전 준비사항:
 #   1. GitHub Secrets에 아래 환경변수 등록
 #      - NAVER_COOKIE           → 네이버 로그인 세션 쿠키 (JSESSIONID 포함)
@@ -14,10 +15,6 @@
 #      - NOTION_DATABASE_ID     → Notion 데이터베이스 ID
 #   2. package.json에 "start": "node index.js" 설정 필요
 #   3. notion.js, index.js 파일이 루트 디렉토리에 있어야 함
-# 
-# 🕓 실행 주기:
-#   - UTC 18:00 = KST(한국시간) 새벽 3시
-#   - 하루 1회 자동 스크랩
 # ───────────────────────────────────────────────
 
 name: Naver BlogHome to Notion  # 워크플로우 이름
@@ -33,8 +30,17 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest  # 최신 Ubuntu 환경에서 실행
-    timeout-minutes: 60     # (선택) 최대 실행시간 제한
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # (선택) 최대 실행시간 제한
+
+    # 🚧 concurrency 설정 (중복 실행 방지)
+    concurrency:
+      group: notion-scripts
+      cancel-in-progress: false
+      # 설명:
+      # - group: 동일 그룹 내에서는 동시에 한 개만 실행 가능
+      # - cancel-in-progress: false → 기존 실행 중인 워크플로우를 유지하고, 새 실행은 대기함
+      #   (true로 바꾸면 새 실행 시 기존 실행은 자동 취소됨)
 
     # 🧩 Node.js 앱에서 사용할 환경변수 설정
     env:
@@ -46,30 +52,27 @@ jobs:
 
     steps:
       # 1️⃣ 코드 체크아웃
-      #   - GitHub 저장소의 최신 커밋을 가져옴
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # 2️⃣ Node.js 설치
-      #   - Node.js 버전 20.x 환경 구성
-      #   - npm과 함께 사용 가능
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       # 3️⃣ 의존성 설치
-      #   - package.json 기반으로 필요한 패키지 설치
       - name: Install dependencies
         run: npm install
 
       # 4️⃣ 스크래퍼 실행
-      #   - npm start → node index.js 실행
-      #   - index.js 내부에서 notion.js 호출
       - name: Run scraper
         run: npm start
 
-      # (선택) 5️⃣ 로그 확인용 출력
-      #   - Actions 실행 후 로그로 스크랩 진행상황 확인 가능
-      #   - 기본적으로 콘솔 로그에 "📥, 🆕, 🔄, ❌" 표시됨
-      #   - 결과: "✅ 전체 스크랩 완료. 총 N건 처리 시도."
+      # (선택) 5️⃣ 실행 결과 출력
+      - name: Print workflow summary
+        if: always()
+        run: |
+          echo "📊 워크플로우 실행 완료 시간: $(date)"
+          echo "⚙️  최대 페이지: $MAX_PAGE"
+          echo "🔒 concurrency group: notion-scripts (중복 실행 방지 활성화)"
