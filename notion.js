@@ -10,6 +10,7 @@
  *  - 기존 글이면 update, 없으면 create
  *  - 기존 내용이 동일하면 update 생략 (⏩ 변경 없음)
  *  - Description 필드는 비교 제외 → 불필요한 update 방지
+ *  - ⚙️ 조회 타임아웃 발생 시 3회 재시도 후 스킵
  */
 
 import { Client } from "@notionhq/client";
@@ -67,6 +68,39 @@ function extractYearMonthQuarter(isoString) {
 }
 
 // ───────────────────────────────────────────────
+// 🔁 Notion 조회 재시도 함수 (최대 3회)
+// ───────────────────────────────────────────────
+async function findExistingPageWithRetry(uniqueId, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const query = await notion.databases.query({
+        database_id: databaseId,
+        filter: {
+          property: "UniqueID",
+          rich_text: { equals: uniqueId },
+        },
+      });
+      return query.results?.[0] || null;
+    } catch (err) {
+      const msg = err.code || err.message || String(err);
+      console.warn(
+        `⚠️ Notion 조회 실패 (${attempt}/${retries}) [${uniqueId}]: ${msg}`
+      );
+
+      // 타임아웃/네트워크 지연 시 잠시 대기 후 재시도
+      if (attempt < retries) {
+        const delay = 1000 * attempt; // 1초, 2초, 3초 점증 대기
+        console.log(`⏳ ${delay / 1000}s 후 재시도합니다...`);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        console.error(`❌ Notion 조회 포기: ${uniqueId} (이 글은 스킵됩니다)`);
+        return null;
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────
 // 💾 Notion 업서트 (있으면 update, 없으면 create)
 // ───────────────────────────────────────────────
 export async function upsertPost(post) {
@@ -80,19 +114,11 @@ export async function upsertPost(post) {
     return;
   }
 
-  // ── 1️⃣ 기존 데이터 조회
-  let existing;
-  try {
-    const query = await notion.databases.query({
-      database_id: databaseId,
-      filter: {
-        property: "UniqueID",
-        rich_text: { equals: uniqueId },
-      },
-    });
-    existing = query.results?.[0];
-  } catch (err) {
-    console.error("❌ Notion 조회 오류:", err.message);
+  // ── 1️⃣ 기존 데이터 조회 (재시도 포함)
+  const existing = await findExistingPageWithRetry(uniqueId);
+  if (existing === null && existing !== undefined) {
+    console.warn(`⏭️ Notion 조회 실패로 스킵: ${post.title}`);
+    return;
   }
 
   // ── 2️⃣ 날짜 변환
@@ -116,7 +142,9 @@ export async function upsertPost(post) {
     UniqueID: { rich_text: [{ text: { content: uniqueId } }] },
     ...(blogId && { ID: { rich_text: [{ text: { content: blogId } }] } }),
     ...(year && { 연도: { rich_text: [{ text: { content: year } }] } }),
-    ...(yearMonth && { 연월: { rich_text: [{ text: { content: yearMonth } }] } }),
+    ...(yearMonth && {
+      연월: { rich_text: [{ text: { content: yearMonth } }] },
+    }),
     ...(quarter && { 분기: { rich_text: [{ text: { content: quarter } }] } }),
   };
 
