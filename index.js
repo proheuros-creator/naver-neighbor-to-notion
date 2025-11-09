@@ -154,11 +154,11 @@ async function fetchPagePosts(page) {
         item.previewText ||
         '';
 
-      const category =
-        item.categoryName ||
-        item.directoryName ||
-        item.category ||
-        '';
+      //const category =
+        //item.categoryName ||
+        //item.directoryName ||
+        //item.category ||
+        //'';
 
       const postId = logNo || null;
 
@@ -171,7 +171,7 @@ async function fetchPagePosts(page) {
         nickname,
         pubdate,
         description,
-        category,
+        //category,
         blogId,
         postId,
       };
