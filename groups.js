@@ -12,7 +12,7 @@ export const GROUPS = [
   { id: 5, name: "중국투자" },  
   { id: 3, name: "미국투자" }, 
   { id: 9, name: "에코" },
-  { id: 2, name: "투자" }
+  { id: 2, name: "투자" },
   { id: 13, name: "투자(Diligent)" },
   { id: 14, name: "투자(정리)" },  
   { id: 7, name: "투자(insight)" },
