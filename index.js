@@ -5,20 +5,27 @@
  * 
  * ✅ 주요 기능:
  *  - NAVER_NEIGHBOR_API_URL 기반으로 BuddyPostList를 반복 요청하여 글 목록 수집
- *  - 150페이지 → 1페이지까지 역순(최신 페이지 우선) 스크랩
+ *  - MAX_PAGE → 1페이지까지 역순(최신 페이지 우선) 스크랩
  *  - 각 페이지 내 글은 “아래 → 위” 순서로 처리 (오래된 글 → 최신 글)
- *  - postId + blogId 조합으로 Notion 중복 등록 방지
+ *  - postId + blogId 조합으로 Notion 중복 등록 방지 (UniqueID)
  *  - Notion 데이터베이스에 글 정보를 자동 저장
+ *  - (옵션) NAVER_NEIGHBOR_GROUP / 응답 값으로 이웃그룹(Group) 태깅
  */
 
 import 'dotenv/config';
 import fetch from 'node-fetch';
 import { upsertPost } from './notion.js';
 
-// 환경변수 로드
+// ───────────────────────────────────────────────
+// 🔧 환경변수 로드
+// ───────────────────────────────────────────────
 const NAVER_COOKIE = process.env.NAVER_COOKIE;
 const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
 const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
+
+// 이 워크플로우가 특정 이웃 그룹용이면 여기서 라벨링
+// 예: NAVER_NEIGHBOR_GROUP="전체", "직장", "VIP", ...
+const NEIGHBOR_GROUP_LABEL = process.env.NAVER_NEIGHBOR_GROUP || '';
 
 // 필수 환경변수 확인
 if (!NAVER_COOKIE) {
@@ -42,7 +49,6 @@ function buildPageUrl(page) {
     url.searchParams.set('page', String(page));
     return url.toString();
   } catch (e) {
-    // 혹시 URL 생성 실패 시 단순 문자열 치환으로 대체
     return API_TEMPLATE.replace(/page=\d+/, `page=${page}`);
   }
 }
@@ -57,7 +63,6 @@ function stripNaverPrefix(raw) {
 
 /**
  * JSON 파싱 실패 시 일부만 미리보기용으로 출력
- *  - 긴 응답 전체를 콘솔에 찍지 않기 위한 조치
  */
 function cleanedPreview(raw) {
   const cleaned = stripNaverPrefix(raw || '');
@@ -70,7 +75,6 @@ function cleanedPreview(raw) {
 async function fetchPagePosts(page) {
   const url = buildPageUrl(page);
 
-  // 쿠키 인증 헤더 포함 (로그인 기반 접근용)
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (NaverNeighborScraper)',
@@ -80,16 +84,13 @@ async function fetchPagePosts(page) {
     },
   });
 
-  // 요청 실패 처리
   if (!res.ok) {
     console.error(`❌ ${page}페이지 API 요청 실패:`, res.status, res.statusText);
     return { posts: [] };
   }
 
-  // 응답 텍스트 읽기
   const raw = await res.text();
 
-  // JSON 파싱 (보안 prefix 제거 포함)
   let data;
   try {
     const cleaned = stripNaverPrefix(raw);
@@ -100,7 +101,6 @@ async function fetchPagePosts(page) {
     return { posts: [] };
   }
 
-  // BuddyPostList 구조 추출 (서버 버전에 따라 key 이름이 다를 수 있음)
   const result = data.result || data;
   const list =
     result.buddyPostList ||
@@ -109,7 +109,6 @@ async function fetchPagePosts(page) {
     result.items ||
     [];
 
-  // 필요한 필드만 추출
   let posts = list
     .map((item) => {
       const title = item.title || item.postTitle || '';
@@ -124,7 +123,6 @@ async function fetchPagePosts(page) {
         item.articleId ||
         null;
 
-      // 블로그 URL (없으면 blogId/logNo 조합으로 생성)
       const link =
         item.url ||
         item.postUrl ||
@@ -154,15 +152,15 @@ async function fetchPagePosts(page) {
         item.previewText ||
         '';
 
-      //const category =
-        //item.categoryName ||
-        //item.directoryName ||
-        //item.category ||
-        //'';
-
       const postId = logNo || null;
 
-      // 필수 항목(title, link, postId)이 없으면 제외
+      // 🔹 이웃 그룹 (있으면 응답값 우선, 없으면 워크플로우 라벨)
+      const group =
+        item.groupName ||
+        item.buddyGroupName ||
+        NEIGHBOR_GROUP_LABEL ||
+        '';
+
       if (!title || !link || !postId) return null;
 
       return {
@@ -171,18 +169,14 @@ async function fetchPagePosts(page) {
         nickname,
         pubdate,
         description,
-        //category,
         blogId,
         postId,
+        group, // 👉 notion.js로 전달
       };
     })
     .filter(Boolean);
 
-  /**
-   * ✅ 순서 조정:
-   *   - 네이버 응답은 보통 “최신글 → 오래된 글” 순으로 정렬됨.
-   *   - 우리가 원하는 것은 “아래 → 위” 즉, “오래된 글 → 최신글” 순서이므로 reverse().
-   */
+  // 오래된 글 → 최신 글 순서로 처리하기 위해 reverse()
   posts = posts.reverse();
 
   return { posts };
@@ -190,8 +184,6 @@ async function fetchPagePosts(page) {
 
 /**
  * 전체 실행 프로세스
- *  - 150페이지 → 1페이지까지 역순 수집
- *  - 각 글을 순차적으로 Notion에 upsert
  */
 async function main() {
   console.log('🚀 BuddyPostList API → Notion 스크랩 시작');
@@ -204,26 +196,22 @@ async function main() {
     console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
     total += posts.length;
 
-    // 오래된 글부터 최신 글 순으로 업서트
     for (const post of posts) {
       try {
-        await upsertPost(post); // 노션에 저장 또는 업데이트
+        await upsertPost(post);
       } catch (err) {
         console.error('❌ Notion 저장 오류:', err.message);
       }
 
-      // 요청 간 약간의 딜레이 추가 (API 부하 완화)
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300)); // 글 간 딜레이
     }
 
-    // 페이지 간 간격 (1초)
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000)); // 페이지 간 딜레이
   }
 
   console.log(`✅ 전체 스크랩 완료. 총 ${total}건 처리 시도.`);
 }
 
-// 메인 실행
 main().catch((err) => {
   console.error('❌ 스크립트 전체 오류:', err);
   process.exit(1);
