@@ -1,40 +1,45 @@
 /**
  * notion.js
  * ───────────────────────────────────────────────
- * 🧩 네이버 이웃새글 → Notion DB 업서트 모듈
+ * 🧩 네이버 이웃새글 → Notion DB 업서트 모듈 (연도/연월/분기/Group 포함)
  *
- * 기능 요약
- * - UniqueID = `${blogId}_${postId}` 로 식별
- * - pubdate → ISO 변환 + 연도/연월/분기 계산
- * - ID(Text) = blogId, Group(Text) = 이웃그룹명 / 라벨
- * - 기존 페이지가 있으면:
- *     * Title / URL / Category / Group 이 동일하면 스킵
- *     * 다르면 해당 필드 + 날짜/설명/ID/Group 업데이트
- * - 조회 실패 시 3회 재시도 후에도 실패하면 "누락 방지"를 위해 새 페이지 생성 (중복 가능성 허용)
+ * ✅ 주요 기능:
+ *  - UniqueID(blogId_postId)로 중복 등록 방지
+ *  - pubdate로부터 연도/연월/분기 추출 및 저장
+ *  - blogId를 ID 컬럼에 저장
+ *  - Group 컬럼에 이웃그룹 저장 (URL 또는 응답 기반)
+ *  - 기존 글이면 update, 없으면 create
+ *  - 기존 내용이 동일하면 update 생략 (⏩ 변경 없음)
+ *  - Description 필드는 비교 제외 → 불필요한 update 방지
+ *  - ⚙️ 조회 타임아웃 발생 시 3회 재시도 후에도 실패 시 새로 생성
  */
 
-import { Client } from "@self"; // same as previous
+import { Client } from "@notionhq/client";
 
-const notion = new Client({ auth: process.env.);
-const date = process.env.NOD});
+// ───────────────────────────────────────────────
+// 🔧 기본 설정
+// ───────────────────────────────────────────────
+const notion = new Client({ auth: process.env.NOTION_API_KEY });
+const databaseId = process.env.NOTION_DATABASE_ID;
 
-// 기본 검증
-if (!database) {
+if (!databaseId) {
   console.error("❌ NOTION_DATABASE_ID 가 설정되어 있지 않습니다.");
   process.exit(1);
 }
 
-// ───────────── Helpers
+// ───────────────────────────────────────────────
+// 🕒 pubdate ISO 변환
+// ───────────────────────────────────────────────
+function normalizeNaverDate(raw) {
+  if (!raw) return null;
 
-function normalizeDate(ra) {
-  if (!ra) return null;
-  if (typeof ra === "number") return new Date(ra).toISOString();
+  if (typeof raw === "number") return new Date(raw).toISOString();
 
-  const s = String(ra).trim();
+  const s = String(raw).trim();
   if (/^\d{13}$/.test(s)) return new Date(Number(s)).toISOString();
   if (/^\d{10}$/.test(s)) return new Date(Number(s) * 1000).toISOString();
 
-  const norm = s
+  const replaced = s
     .replace(/\./g, "-")
     .replace(/\//g, "-")
     .replace("년", "-")
@@ -42,91 +47,60 @@ function normalizeDate(ra) {
     .replace("일", "")
     .trim();
 
-  const d = new Date(norm);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  const d = new Date(replaced);
+  return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-function calcYMQ(iso) {
-  if (!iso) return { year: "", month: "", quarter: "" };
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { year: "", month: "", quarter: "" };
+// ───────────────────────────────────────────────
+// 📅 연도·연월·분기 추출
+// ───────────────────────────────────────────────
+function extractYearMonthQuarter(isoString) {
+  if (!isoString) return { year: "", yearMonth: "", quarter: "" };
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) return { year: "", yearMonth: "", quarter: "" };
 
-  const y = String(d.getFullYear());
-  const m = d.getMonth() + 1;
-  const mm = m < 10 ? `0${m}` : String(m);
-  const q = m <= 3 ? "1Q" : m <= 6 ? "2Q" : m <= 9 ? "3Q" : "4Q";
-  return { year: y, month: mm, quarter: q };
+  const year = String(d.getFullYear());
+  const month = d.getMonth() + 1;
+  const mm = String(month).padStart(2, "0");
+  const yearMonth = `${year}-${mm}`;
+  const q = month <= 3 ? "Q1" : month <= 6 ? "Q2" : month <= 9 ? "Q3" : "Q4";
+  const quarter = `${year}-${q}`;
+  return { year, yearMonth, quarter };
 }
 
-// 조회 재시도
-async function findExisting(uniqueId, retry = 3) {
-  for (let i = 0; i < retry; i++) {
+// ───────────────────────────────────────────────
+// 🔁 Notion 조회 재시도 함수 (최대 3회)
+// ───────────────────────────────────────────────
+async function findExistingPageWithRetry(uniqueId, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const { results } = await notion.databases.query({
-        database,
+      const query = await notion.databases.query({
+        database_id: databaseId,
         filter: {
           property: "UniqueID",
-          text: { equals: uniqueId }
-        }
+          rich_text: { equals: uniqueId },
+        },
       });
-      return results[0] || null;
-    } catch (e) {
-      const msg = e.code || e.message || String(e);
-      console.warn(`⚠️ findExisting 실패(${i + 1}/${retry}) ${msg}`);
-      if (i === retry - 1) {
-        console.error(`❌ UniqueID=${uniqueId} 조회 최종 실패 → 새로 생성 시도(중복 가능성 有)`);
-        return undefined; // 신뢰 안됨 → 아래에서 신규 생성 경로로
+      return query.results?.[0] || null;
+    } catch (err) {
+      const msg = err.code || err.message || String(err);
+      console.warn(
+        `⚠️ Notion 조회 실패 (${attempt}/${retries}) [${uniqueId}]: ${msg}`
+      );
+
+      if (attempt < retries) {
+        const delay = 1000 * attempt;
+        console.log(`⏳ ${delay / 1000}s 후 재시도합니다...`);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        console.error(
+          `❌ Notion 조회 최종 실패: ${uniqueId} (중복 가능성 감수, 새 페이지 생성 예정)`
+        );
+        return undefined;
       }
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
 
-// ───────────── Main upsert
-
-export async function upsertPost(post) {
-  const blogId = String(post.blogId || "").trim();
-  const postId = String(post.postId || "").trim();
-  const group = (post.group || "").trim();
-
-  // UniqueID 구성
-  const uniqueId =
-    (blogId && postId) ? `${blogId}_${postId}` :
-    postId || null;
-
-  if (!uniqueId) {
-    console.warn("⚠️ UniqueID 없음, 스킵:", post.title);
-    return;
-  }
-
-  const existing = await findExisting(uniqueId);
-
-  const iso = normalizeDate(post.pubdate);
-  const { year, month, quarter } = calcYMQ(iso);
-  const createdAt = new Date().toISOString();
-
-  const props = {
-    // 기본 정보
-    "Title": { type: "title", title: [{ text: { content: post.title || "" } }] },
-    "URL":   { type: "url", url: post.link || null },
-    "Nickname": { type: "rich_text", rich_text: [{ text: { content: post.nickname || "" } }] },
-    "Description": {
-      type: "rich_text",
-      rich_text: [{ text: { content: (post.description || "").slice(0, 1800) } }]
-    },
-
-    // 날짜 관련
-    ...(iso && { "Date": { type: "date", date: { start: iso } } }),
-    "CreatedAt": { type: "date", date: { start: createdAt } },
-
-    // 식별 / 메타
-    "UniqueID": { type: "rich_text", rich_text: [{ text: { content: uniqueId } }] },
-    ...(blogId && { "ID": { type: "rich_text", rich_text: [{ text: { content: blogId } }] } }),
-
-    // 그룹
-    ...(group && { "Group": { type: "rich_text", rich_text: [{ text: { content: group } }] } }),
-
-    // 파생 메타
-    ...(year && { "Year": { type: "rich_text", rich_text: [{ text: { content: year } }] } }),
-    ...(month && { "Month": { type: "rich_text", rich_text: [{ text: { content: month } }] } }),
-    ...(quarter && { "Quarter": { type: "rich_text", rich_text: [{ text: { content
+// ───────────────────────────────────────────────
+// 💾 Notion
