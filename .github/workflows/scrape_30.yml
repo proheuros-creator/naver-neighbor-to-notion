@@ -1,0 +1,78 @@
+# ───────────────────────────────────────────────
+# 🧭 Naver BlogHome → Notion 자동 스크랩 워크플로우
+#
+# ✅ 주요 기능:
+#   - 매일 한국시간 새벽 3시에 자동 실행
+#   - 또는 GitHub Actions → "Run workflow" 버튼으로 수동 실행 가능
+#   - Node.js 환경에서 index.js 실행 → notion.js와 연동
+#   - concurrency 설정으로 스크랩 중복 실행 방지
+#
+# ⚙️ 사전 준비사항:
+#   1. GitHub Secrets에 아래 환경변수 등록
+#      - NAVER_COOKIE           → 네이버 로그인 세션 쿠키 (JSESSIONID 포함)
+#      - NAVER_NEIGHBOR_API_URL → BuddyPostList API URL (예: https://section.blog.naver.com/ajax/BuddyPostList.naver?page=1&groupId=0)
+#      - NOTION_API_KEY         → Notion 통합(Integration) API 키
+#      - NOTION_DATABASE_ID     → Notion 데이터베이스 ID
+#   2. package.json에 "start": "node index.js" 설정 필요
+#   3. notion.js, index.js 파일이 루트 디렉토리에 있어야 함
+# ───────────────────────────────────────────────
+
+name: Naver BlogHome to Notion  # 워크플로우 이름
+
+on:
+  # ⏰ (1) 스케줄 기반 실행
+  schedule:
+    # 매일 UTC 18:00 (한국시간 새벽 3시)
+    - cron: '0 18 * * *'
+
+  # 🖐 (2) 수동 실행 (GitHub Actions > Run workflow 버튼)
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720  # (선택) 최대 실행시간 제한
+
+    # 🚧 concurrency 설정 (중복 실행 방지)
+    concurrency:
+      group: notion-scripts
+      cancel-in-progress: false
+      # 설명:
+      # - group: 동일 그룹 내에서는 동시에 한 개만 실행 가능
+      # - cancel-in-progress: false → 기존 실행 중인 워크플로우를 유지하고, 새 실행은 대기함
+      #   (true로 바꾸면 새 실행 시 기존 실행은 자동 취소됨)
+
+    # 🧩 Node.js 앱에서 사용할 환경변수 설정
+    env:
+      NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+      NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      MAX_PAGE: 30  # 스크랩할 마지막 페이지 (150 → 1 순으로 수집)
+
+    steps:
+      # 1️⃣ 코드 체크아웃
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Node.js 설치
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 3️⃣ 의존성 설치
+      - name: Install dependencies
+        run: npm install
+
+      # 4️⃣ 스크래퍼 실행
+      - name: Run scraper
+        run: npm start
+
+      # (선택) 5️⃣ 실행 결과 출력
+      - name: Print workflow summary
+        if: always()
+        run: |
+          echo "📊 워크플로우 실행 완료 시간: $(date)"
+          echo "⚙️  최대 페이지: $MAX_PAGE"
+          echo "🔒 concurrency group: notion-scripts (중복 실행 방지 활성화)"
