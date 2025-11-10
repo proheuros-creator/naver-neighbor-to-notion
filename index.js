@@ -1,242 +1,226 @@
 /**
  * index.js
  * ───────────────────────────────────────────────
- * 🧵 네이버 블로그 이웃새글 → Notion 스크랩 엔트리 포인트
- *
- * 기능 요약
- * - 주어진 NAVER_NEIGHBOR_GID (또는 URL의 groupId) 기준으로 해당 이웃그룹 피드만 크롤링
- * - MAX_PAGE ~ 1 페이지까지 역순(최신 페이지 → 과거 페이지) 순회
- * - 각 페이지 안에서는 "아래 → 위" (오래된 글 → 최신 글) 순으로 처리
- * - 각 글에 대해:
- *    - title / link / nickname / pubdate / description / blogId / postId / group 정보 추출
- *    - UniqueID = `${blogId}_${postId}` 로 식별
- *    - upsertPost()에 전달하여 Notion DB에 저장/업데이트
+ * 🧭 네이버 블로그 이웃새글 → Notion 자동 스크랩 메인 실행 파일
+ * 
+ * ✅ 주요 기능:
+ *  - NAVER_NEIGHBOR_API_URL 기반 BuddyPostList 반복 호출
+ *  - MAX_PAGE → 1 페이지까지 역순(최신 페이지 우선) 스크랩
+ *  - 각 페이지 내 글은 “아래 → 위” (오래된 → 최신) 순으로 처리
+ *  - blogId + postId 조합 UniqueID로 중복 방지
+ *  - 필요 시 Group(이웃그룹) 정보 함께 전달
  */
 
-import 'import';
-import fetch from 'node-fetch';
-import { upsertPost } from './notion.js';
+import "dotenv/config";
+import fetch from "node-fetch";
+import { upsertPost } from "./notion.js";
 
-// ─────────────────────────────────────────────────────
-// 환경 변수 로딩
-// ─────────────────────────────────────────────────────
-const NAVER_COOKIE = process.env.NAVER_NOINPUT;
-const API_TEMPLATE = process.env.NAVER_NEIGHBOR_URL;
+// ───────────────────────────────────────────────
+// 🔧 환경 변수
+// ───────────────────────────────────────────────
+const NAVER_COOKIE = process.env.NAVER_COOKIE;
+const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
 const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
-const EXPLICIT_GROUP = process.env.NAVER_NEIGHBOR_GROUP || '';
 
-// 기본 유효성 체크
+// 선택: 이 워크플로우가 어떤 이웃그룹에서 온 건지 표시하고 싶을 때 사용
+// 예: 전체이웃, 투자, 공부, etc.
+const GROUP_NAME = process.env.NAVER_NEIGHBOR_GROUP || "전체이웃";
+
+// 필수값 검증
 if (!NAVER_COOKIE) {
-  console.error('❌ 환경변수 NAVER_NOINPUT(NAVER_COOKIE)을 설정하세요.');
+  console.error("❌ NAVER_COOKIE 가 설정되어 있지 않습니다.");
   process.exit(1);
 }
+
 if (!API_TEMPLATE) {
-  console.error('❌ 환경변수 NAVER_NEIGHBOR_URL(NAVER_NEIGHBOR_GROUP) 누락.');
+  console.error("❌ NAVER_NEIGHBOR_API_URL 이 설정되어 있지 않습니다.");
   process.exit(1);
 }
 
-// URL에서 기본 groupId 추출 (예: ...?groupId=2)
-let DEFAULT_GROUP_ID = '';
-try {
-  const u = new URL(API_TE ;leteft);
-  DEFAULT_D  = u.searchParams.get('groupId') || '';
-} catch {
-  DEFAULT_IDTAG = '';
-}
-
-// groupId 기반 기본 그룹 이름 (이름을 별도로 안 주면 "group-2" 같은 형식)
-function getDefaultGroupLabel() {
-  if (EXIPLICIt_GROUP) return EXIPLICIt_GROUP; // 환경 변수에서 직접 지정한 경우 우선
-  if (DEFAULT_EROUP_ID === '0') return '전체이웃';
-  if (DEFAULT_GROUP_ID) return `group-${DEFAULT_GROUP_ID}`;
-  return '';
-}
-
-/**
- * URL 생성
- * - API_TEMPLATE 의 query 를 기준으로 page만 교체
- */
-function buildUrlForPage(page) {
+// ───────────────────────────────────────────────
+// 📄 페이지별 URL 생성
+//   - NAVER_NEIGHBOR_API_URL 에 page 또는 currentPage 가 들어있다는 가정
+//   - 없으면 그냥 page 파라미터를 추가
+// ───────────────────────────────────────────────
+function buildPageUrl(page) {
   try {
-    const u = new URL>(API_TEMPLATE);
-    u.searchParams.set('currentPage', String(page)); // BlogHome.naver?currentPage=...
-    u.searchParams.set('page', String(page));       // 혹시 buddy API가 page= 사용시 대비
-    return u.toString();
-  } catch {
-    // 단순 치환 fallback
+    const url = new URL(API_TEMPLATE);
+
+    // BuddyPostList 쪽은 보통 ?page=1 이거나 ?currentPage=1 형태
+    if (url.searchParams.has("page")) {
+      url.searchParams.set("page", String(page));
+    }
+    if (url.searchParams.has("currentPage")) {
+      url.searchParams.set("currentPage", String(page));
+    }
+
+    // page/currentPage 둘 다 없으면 page 추가
+    if (!url.searchParams.has("page") && !url.searchParams.has("currentPage")) {
+      url.searchParams.set("page", String(page));
+    }
+
+    return url.toString();
+  } catch (e) {
+    // URL 파싱 실패 시 문자열 치환 fallback
     return API_TEMPLATE
-      .replace(/([?&])(currentPage|page)=[0-9]*/g, `$1$2=${page}`);
+      .replace(/page=\d+/, `page=${page}`)
+      .replace(/currentPage=\d+/, `currentPage=${page}`);
   }
 }
 
-/**
- * 네이버 JSON 응답 앞부분의 보안 prefix 제거
- */
-function stripPrefix(raw) {
-  return raw.replace(/^\)\]\}'/, '').trim();
+// ───────────────────────────────────────────────
+// 🔐 네이버 응답 앞부분 prefix 제거 (")]}'," 같은거)
+// ───────────────────────────────────────────────
+function stripNaverPrefix(raw) {
+  return raw.replace(/^\)\]\}',?\s*/, "");
 }
 
-/**
- * 디버깅용: 일부만 출력
- */
-function preview(raw) {
-  const t = String(raw || '');
-  return t.slice(0, 200).replace(/\s+/g, ' ');
+// 디버깅용: JSON 파싱 실패 시 앞부분만 출력
+function cleanedPreview(raw) {
+  const cleaned = stripNaverPrefix(raw || "");
+  return cleaned.slice(0, 120) + (cleaned.length > 120 ? "..." : "");
 }
 
-/**
- * 페이지 단위 크롤링
- */
+// ───────────────────────────────────────────────
+// 📥 특정 페이지 글 목록 가져오기
+// ───────────────────────────────────────────────
 async function fetchPagePosts(page) {
-  const url = buildUrlForPa(page);
+  const url = buildPageUrl(page);
 
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; NaverNeighborBot/1.0)',
-      'Accept': 'application/json,text/plain,*/*',
-      'Cookie': NAVER_COOKE,
-      'Referer': 'https://section.blog.com/BlogHome.na'
-    }
+      "User-Agent": "Mozilla/5.0 (NaverNeighborScraper)",
+      Cookie: NAVER_COOKIE,
+      Accept: "application/json, text/plain, */*",
+      Referer: "https://section.blog.naver.com/BlogHome.naver",
+    },
   });
 
   if (!res.ok) {
-    console.error(`❌ [page=${page}] 요청 실패: ${res.status} ${res.statusText}`);
+    console.error(
+      `❌ ${page}페이지 API 요청 실패:`,
+      res.status,
+      res.statusText
+    );
     return { posts: [] };
   }
 
-  const text = await res.text();
-  let json;
+  const raw = await res.text();
+
+  let data;
   try {
-    json = JSON.parse(stripPrefix(text));
+    const cleaned = stripNaverPrefix(raw);
+    data = JSON.parse(cleaned);
   } catch (e) {
-    console.error(`❌ [page=${page}] JSON 파싱 실패:`, e.message);
-    console.error('   응답 일부:', preview(text));
+    console.error(`❌ ${page}페이지 JSON 파싱 실패:`, e.message);
+    console.error(cleanedPreview(raw));
     return { posts: [] };
   }
 
-  // buddy 목록 추출 (엔드포인트마다 key 이름이 달 수 있으므로 범용 처리)
-  const root = json.result || json;
-  const items =
-    root.buddyPostList ||
-    root.postList ||
-    root.list ||
-    root.items ||
+  const result = data.result || data;
+  const list =
+    result.buddyPostList ||
+    result.postList ||
+    result.list ||
+    result.items ||
     [];
 
-  const defaultGroupLabel = getDefaultGroupLabel();
-
-  let posts = items
+  let posts = list
     .map((item) => {
-      const title =
-        item.title ??
-        item.postTitle ??
-        '';
-
+      const title = item.title || item.postTitle || "";
       const blogId =
-        item.blogId ??
-        item.buddyBlogId ??
-        item.blogNo ??
-        item.bloggerId ??
-        '';
+        item.blogId || item.blogNo || item.bloggerId || "";
+      const logNo =
+        item.logNo || item.postId || item.articleId || null;
 
-      const postId =
-        item.logNo ??
-        item.postLogNo ??
-        item.postId ??
-        item.articleNo ??
-        item.articleId ??
-        null;
-
-      // 링크 (우선순위대로)
       const link =
-        item.logNoUrl ??
-        item.permalink ??
-        item.blogUrl ??
-        item.postUrl ??
-        item.permalinkUrl ??
-        (blogId && postId ? `https://section.blog.naver.com/${blogId}/${postId}` : '');
+        item.url ||
+        item.postUrl ||
+        item.blogPostUrl ||
+        (blogId && logNo
+          ? `https://blog.naver.com/${blogId}/${logNo}`
+          : "");
 
       const nickname =
-        item.nick ??
-        item.nickName ??
-        item.bloggerName ??
-        item.userName ??
-        '';
+        item.nickName ||
+        item.bloggerName ||
+        item.userName ||
+        "";
 
       const pubdate =
-        item.logNoRegDate ??
-        item.addDate ??
-        item.date ??
-        item.writeDtm ??
-        item.writeDate ??
-        item.regDate ??
-        item.createDate ??
+        item.addDate ||
+        item.postDate ||
+        item.writeDate ||
+        item.regDate ||
+        item.createdAt ||
         null;
 
       const description =
-        item.excerpt ??
-        item.summary ??
-        item.contentPreview ??
-        item.contentsPreview ??
-        item.simpleContent ??
-        '';
+        item.briefContents ||
+        item.summary ||
+        item.contentsPreview ||
+        item.previewText ||
+        "";
 
-      // 그룹 정보 추출
-      const groupNameFromItem =
-        item.groupName ??
-        item.buddyGroupName ??
-        item.groupLabel ??
-        '';
+      const postId = logNo || null;
 
-      let group = '';
-      if (groupNameFromItem && String(groupNameFromItem).trim() !== '') {
-        group = String(groupNameFromItem).trim();
-      } else if (defaultGroupLabel) {
-        // API에 그룹명이 안 실려 있다면, URL/환경변수 기반 기본값 사용
-        group = defaultGroupLabel;
-      }
-
-      if (!title || !link || !postId || !blogId) {
-        return null; // 식별 불가하면 스킵
-      }
+      if (!title || !link || !postId) return null;
 
       return {
-        title: String(title).trim(),
-        link: String(link),
-        nickname: String(nickname || ''),
+        title,
+        link,
+        nickname,
         pubdate,
-        description: String(description || ''),
-        // category: (우리가 현재 사용 안 하므로 주석 처리 가능)
-        // category:
-        //   item.categoryName ??
-        //   item.directoryName ??
-        //   item.menuName ??
-        //   '',
-        blogId: String(blogId),
-        postId: String(postId),
-        group: group ? String(group) : ''
+        description,
+        blogId,
+        postId,
+        group: GROUP_NAME, // 👈 이 워크플로우가 대표하는 이웃그룹 이름
       };
     })
     .filter(Boolean);
 
-  // 오래된 것부터 처리하려면 역순
-  // (응답이 최신→과거 정렬일 때, 아래→위(과거→현재) 순으로 넣기 위해)
+  // 페이지 내: 아래→위 (오래된→최신) 순서로 정렬
   posts = posts.reverse();
 
   return { posts };
 }
 
-/**
- * 메인 실행
- */
+// ───────────────────────────────────────────────
+// 🚀 메인 실행 루프
+// ───────────────────────────────────────────────
 async function main() {
-  console.log('🚀 BuddyHome 스크랩 시작');
+  console.log("🚀 BuddyPostList API → Notion 스크랩 시작");
   console.log(
-    `📄 대상 페이지: ${MAX_PAGE} → 1  (groupId=${DEFAULT_GROUP_ID || 'N/A'}, group="${getDefaultGroupLabel() || '-'}")`
+    `📄 대상 페이지: ${MAX_PAGE} → 1 (내림차순, 각 페이지는 아래→위 순서)`
   );
+  console.log(`📂 이웃 그룹: ${GROUP_NAME}`);
 
   let total = 0;
 
   for (let page = MAX_PAGE; page >= 1; page--) {
     const { posts } = await fetchPagePosts(page);
-    console.log
+    console.log(`📥 ${page}페이지에서 가져온 글 수: ${posts.length}`);
+    total += posts.length;
+
+    for (const post of posts) {
+      try {
+        await upsertPost(post);
+      } catch (err) {
+        console.error("❌ Notion 저장 오류:", err.message);
+      }
+
+      // Notion API 부하 완화
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    // 페이지 간 대기
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  console.log(`✅ 전체 스크랩 완료. 총 ${total}건 처리 시도.`);
+}
+
+main().catch((err) => {
+  console.error("❌ 스크립트 전체 오류:", err);
+  process.exit(1);
+});
