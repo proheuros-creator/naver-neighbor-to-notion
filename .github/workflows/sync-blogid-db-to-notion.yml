@@ -1,0 +1,9 @@
+- name: Sync BlogID DB to Notion
+        if: ${{ success() }}
+        working-directory: ./BlogID
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_BLOGID_DB: ${{ secrets.NOTION_BLOGID_DB }}
+        run: |
+          npm install
+          npm run sync:blogid
