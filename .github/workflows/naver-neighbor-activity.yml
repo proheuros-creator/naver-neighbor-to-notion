@@ -20,23 +20,34 @@ jobs:
         working-directory: ./neighbor-activity
         run: npm install
 
-      - name: Run script
+      - name: Run script (generate CSV)
         working-directory: ./neighbor-activity
         env:
           NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
         run: npm start
 
-      - name: Upload CSV
+      - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
           name: neighbor-followings-result
           path: neighbor-activity/neighbor-followings-result.csv
-          
+
       - name: Commit result CSV to repo
+        if: ${{ success() }}
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
+
+          # 최신 main 상태로 동기화
+          git fetch origin main
+          git reset --hard origin/main
+
+          # 결과 CSV를 레포 루트에 복사
           cp neighbor-activity/neighbor-followings-result.csv ./neighbor-followings-result.csv
           git add neighbor-followings-result.csv
+
+          # 변경 없으면 에러 대신 통과
           git commit -m "Add neighbor followings result [skip ci]" || echo "No changes"
-          git push
+
+          # fast-forward 기준으로 main에 푸시
+          git push origin HEAD:main
