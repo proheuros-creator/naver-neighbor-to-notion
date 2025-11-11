@@ -1,5 +1,17 @@
 // BlogID/sync-blogid-from-csv.js
+import fs from "fs";
+import path from "path";
 
+const csvPath = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.resolve("../neighbor-followings-result.csv");
+
+if (!fs.existsSync(csvPath)) {
+  console.error(`❌ CSV not found at ${csvPath}`);
+  process.exit(1);
+}
+
+console.log(`✅ CSV found at ${csvPath}`);
 const fs = require("fs");
 const { Client } = require("@notionhq/client");
 const { parse } = require("csv-parse/sync");
