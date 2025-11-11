@@ -1,0 +1,32 @@
+name: Naver Neighbor Activity Scan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: ./neighbor-activity
+        run: npm install
+
+      - name: Run script
+        working-directory: ./neighbor-activity
+        env:
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 여기 이름을 네 repo에 이미 있는 secret 이름으로 맞추기
+        run: npm start
+
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: neighbor-activity-result
+          path: neighbor-activity/neighbor-activity-result.csv
