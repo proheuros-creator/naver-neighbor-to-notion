@@ -1,7 +1,15 @@
 import 'dotenv/config';
 import { Client } from '@notionhq/client';
+import fs from 'fs';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { fileURLToPath } from 'url';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
+
+// ✅ ESM 환경에서 __dirname 설정
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ✅ 마이그레이션 대상 DB 선택 우선순위
 const databaseId =
@@ -21,15 +29,76 @@ if (!databaseId) {
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
 // Notion 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID';      // 기존 formula 컬럼
-const TEXT_PROP_NAME = 'ID';             // 새 text 컬럼
+const FORMULA_PROP_NAME = 'BlogID_f'; // 기존: BlogID, 변경: BlogID_f (formula)
+const TEXT_PROP_NAME = 'BlogID';      // 기존: ID, 변경: BlogID (text)
 const YEAR_PROP_NAME = '연도';
 const YEARMONTH_PROP_NAME = '연월';
 const QUARTER_PROP_NAME = '분기';
 const DATE_PROP_NAME = '원본 날짜';
+const GROUP_PROP_NAME = 'Group';      // CSV 기반으로 채울 Group 컬럼
 
 // ───────────────────────────────────────────────
-// 🔍 Formula 값 추출 (BlogID formula → string)
+// 📥 neighbor-followings-result.csv → BlogID-Group 매핑
+// ───────────────────────────────────────────────
+const csvPath = process.env.FOLLOWINGS_CSV_PATH
+  ? path.resolve(process.env.FOLLOWINGS_CSV_PATH)
+  : path.resolve(__dirname, '../neighbor-followings-result.csv');
+
+const BLOGID_GROUP_MAP = new Map();
+
+(function loadBlogGroupMap() {
+  if (!fs.existsSync(csvPath)) {
+    console.warn(
+      `⚠️ neighbor-followings-result.csv 를 찾지 못했습니다: ${csvPath}\n` +
+        '   → Group 매핑 없이 BlogID 마이그레이션만 수행합니다.'
+    );
+    return;
+  }
+
+  try {
+    const file = fs.readFileSync(csvPath);
+    const records = parse(file, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    let mapped = 0;
+    for (const row of records) {
+      const blogIdRaw =
+        row.blogId ||
+        row.blogid ||
+        row.BLOGID ||
+        row.BlogID ||
+        row.blog_id ||
+        '';
+      const groupRaw =
+        row.group ||
+        row.Group ||
+        row.groupName ||
+        row.GroupName ||
+        '';
+
+      const blogId = String(blogIdRaw || '').trim();
+      const group = String(groupRaw || '').trim();
+
+      if (!blogId || !group) continue;
+
+      // 동일 blogId가 여러 번 나오면 마지막 값 기준 (필요시 여기서 조건 조정 가능)
+      BLOGID_GROUP_MAP.set(blogId, group);
+      mapped++;
+    }
+
+    console.log(
+      `✅ CSV 로부터 BlogID-Group 매핑 ${BLOGID_GROUP_MAP.size}개 로드 (raw rows: ${records.length})`
+    );
+  } catch (err) {
+    console.error('❌ neighbor-followings-result.csv 파싱 실패:', err);
+  }
+})();
+
+// ───────────────────────────────────────────────
+// 🔍 Formula 값 추출 (BlogID_f formula → string)
 // ───────────────────────────────────────────────
 function extractFormulaValue(formulaProp) {
   if (!formulaProp || formulaProp.type !== 'formula') return null;
@@ -155,7 +224,7 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
-    `🚀 BlogID → ID + 연도/연월/분기 마이그레이션 시작` +
+    `🚀 BlogID_f → BlogID + 연도/연월/분기 + Group 마이그레이션 시작` +
       (MIGRATE_LIMIT
         ? ` (이번 실행 최대 ${MIGRATE_LIMIT}건 업데이트)`
         : ' (업데이트 건수 제한 없음)')
@@ -169,14 +238,16 @@ async function migrate() {
   let updatedYear = 0;
   let updatedYearMonth = 0;
   let updatedQuarter = 0;
+  let updatedGroup = 0;
 
-  // ✅ "아직 마이그레이션 안 된 페이지"만 대상으로 하는 필터
+  // ✅ "아직 마이그레이션 안 된 페이지" + Group 비어있는 페이지 대상으로 필터
   const baseFilter = {
     or: [
       { property: TEXT_PROP_NAME, rich_text: { is_empty: true } },
       { property: YEAR_PROP_NAME, rich_text: { is_empty: true } },
       { property: YEARMONTH_PROP_NAME, rich_text: { is_empty: true } },
       { property: QUARTER_PROP_NAME, rich_text: { is_empty: true } },
+      { property: GROUP_PROP_NAME, rich_text: { is_empty: true } },
     ],
   };
 
@@ -205,19 +276,37 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID formula → ID 텍스트
+      // 1) BlogID_f formula → BlogID 텍스트
+      let blogIdFromFormula = null;
+
       if (props[FORMULA_PROP_NAME] && props[TEXT_PROP_NAME]) {
-        const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
+        blogIdFromFormula = extractFormulaValue(props[FORMULA_PROP_NAME]);
         const textProp = props[TEXT_PROP_NAME];
         const hasText =
           textProp.type === 'rich_text' && textProp.rich_text.length > 0;
 
-        if (formulaValue && !hasText) {
+        if (blogIdFromFormula && !hasText) {
           updates[TEXT_PROP_NAME] = {
-            rich_text: [{ text: { content: formulaValue } }],
+            rich_text: [{ text: { content: blogIdFromFormula } }],
           };
           updatedBlogId++;
         }
+      }
+
+      // ✅ effectiveBlogId: 우선 text BlogID, 없으면 formula 값
+      let effectiveBlogId = null;
+      const textProp = props[TEXT_PROP_NAME];
+      if (
+        textProp &&
+        textProp.type === 'rich_text' &&
+        textProp.rich_text.length > 0
+      ) {
+        effectiveBlogId = textProp.rich_text
+          .map((r) => r.plain_text || '')
+          .join('')
+          .trim();
+      } else if (blogIdFromFormula) {
+        effectiveBlogId = blogIdFromFormula.trim();
       }
 
       // 2) 원본 날짜 기반 연/연월/분기
@@ -225,8 +314,7 @@ async function migrate() {
 
       if (year && props[YEAR_PROP_NAME]) {
         const p = props[YEAR_PROP_NAME];
-        const has =
-          p.type === 'rich_text' && p.rich_text.length > 0;
+        const has = p.type === 'rich_text' && p.rich_text.length > 0;
         if (!has) {
           updates[YEAR_PROP_NAME] = {
             rich_text: [{ text: { content: year } }],
@@ -237,8 +325,7 @@ async function migrate() {
 
       if (yearMonth && props[YEARMONTH_PROP_NAME]) {
         const p = props[YEARMONTH_PROP_NAME];
-        const has =
-          p.type === 'rich_text' && p.rich_text.length > 0;
+        const has = p.type === 'rich_text' && p.rich_text.length > 0;
         if (!has) {
           updates[YEARMONTH_PROP_NAME] = {
             rich_text: [{ text: { content: yearMonth } }],
@@ -249,13 +336,32 @@ async function migrate() {
 
       if (quarter && props[QUARTER_PROP_NAME]) {
         const p = props[QUARTER_PROP_NAME];
-        const has =
-          p.type === 'rich_text' && p.rich_text.length > 0;
+        const has = p.type === 'rich_text' && p.rich_text.length > 0;
         if (!has) {
           updates[QUARTER_PROP_NAME] = {
             rich_text: [{ text: { content: quarter } }],
           };
           updatedQuarter++;
+        }
+      }
+
+      // 3) BlogID 기반 Group 매핑
+      if (
+        effectiveBlogId &&
+        BLOGID_GROUP_MAP.size > 0 &&
+        props[GROUP_PROP_NAME]
+      ) {
+        const groupValue = BLOGID_GROUP_MAP.get(effectiveBlogId);
+        if (groupValue) {
+          const g = props[GROUP_PROP_NAME];
+          const has =
+            g.type === 'rich_text' && g.rich_text.length > 0;
+          if (!has) {
+            updates[GROUP_PROP_NAME] = {
+              rich_text: [{ text: { content: groupValue } }],
+            };
+            updatedGroup++;
+          }
         }
       }
 
@@ -275,7 +381,7 @@ async function migrate() {
       // 진행 상황 로그
       if (scanned % 500 === 0) {
         console.log(
-          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
         );
       }
 
@@ -285,7 +391,7 @@ async function migrate() {
           `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
         );
         console.log(
-          `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+          `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
         );
         return;
       }
@@ -298,7 +404,7 @@ async function migrate() {
   }
 
   console.log(
-    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / ID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter}`
+    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
   );
 }
 
