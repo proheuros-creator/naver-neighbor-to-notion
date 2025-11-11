@@ -3,17 +3,15 @@
  * ───────────────────────────────────────────────
  * 🧭 네이버 블로그 이웃새글 → Notion 자동 스크랩 메인 실행 파일
  *
- * ✅ 동작 개요
+ * 동작:
  *  1. NAVER_NEIGHBOR_API_URL (예: BlogHome.naver?directoryNo=0&currentPage=1&groupId=0)
- *     를 템플릿으로 사용해 MAX_PAGE → 1 페이지까지 조회.
+ *     템플릿을 사용해 MAX_PAGE → 1 페이지까지 조회
  *     - page 또는 currentPage 파라미터만 변경
- *     - groupId 루프 없음 (0 = 전체 이웃 기준)
- *  2. neighbor-followings-result.csv 를 읽어
- *     blogID → groupNames 매핑 생성.
- *  3. 네이버 응답에서 각 글의 blogId를 기준으로:
- *     - post.blogId = blogID
- *     - post.groupName = groupNames (문자열)
- *     을 붙여 notion.js/upsertPost 로 전달.
+ *     - groupId 루프 사용 안 함 (0 = 전체 이웃)
+ *  2. neighbor-followings-result.csv (blogId, groupNames)를 읽어
+ *     blogId → groupNames 매핑 생성
+ *  3. 네이버 응답에서 blogId 기준으로 groupNames 찾아서
+ *     post.groupName 으로 notion.js/upsertPost 에 전달
  */
 
 import "dotenv/config";
@@ -50,15 +48,15 @@ if (!API_TEMPLATE) {
 }
 
 // ───────────────────────────────────────────────
-// 📂 CSV → blogID / groupNames 매핑
+// 📂 CSV → blogId / groupNames 매핑
 // ───────────────────────────────────────────────
 
 /**
- * neighbor-followings-result.csv
- *   - blogID
- *   - groupNames
+ * neighbor-followings-result.csv:
+ *   - blogId
+ *   - groupNames (예: "A" 또는 "A,B,C")
  *
- * map[blogId] = { groupNames, nickname }
+ * map[blogId] = { groupNames }
  */
 function loadBlogMetaMap() {
   if (!fs.existsSync(CSV_PATH)) {
@@ -80,8 +78,8 @@ function loadBlogMetaMap() {
 
     for (const row of records) {
       const blogIdRaw =
-        row.blogID ||
         row.blogId ||
+        row.blogID ||
         row.BlogID ||
         row.blog_no ||
         row.blogNo ||
@@ -91,6 +89,7 @@ function loadBlogMetaMap() {
         row.ID;
 
       if (!blogIdRaw) continue;
+
       const blogId = String(blogIdRaw).trim();
       if (!blogId) continue;
 
@@ -99,28 +98,17 @@ function loadBlogMetaMap() {
         row.groupName ||
         row.GroupNames ||
         row.GroupName ||
-        row.group ||
-        row.Group ||
-        "";
-
-      const nicknameRaw =
-        row.nickname ||
-        row.Nickname ||
-        row.NICKNAME ||
-        row.nick ||
-        row["닉네임"] ||
         "";
 
       map[blogId] = {
         groupNames: groupNamesRaw
           ? String(groupNamesRaw).trim()
           : "",
-        nickname: nicknameRaw ? String(nicknameRaw).trim() : "",
       };
     }
 
     console.log(
-      `✅ CSV 로드 완료: ${Object.keys(map).length}개 blogID → groupNames 매핑`
+      `✅ CSV 로드 완료: ${Object.keys(map).length}개 blogId 매핑`
     );
     return map;
   } catch (err) {
@@ -147,7 +135,7 @@ function buildPageUrl(page) {
       u.searchParams.append("page", String(page));
     }
 
-    // groupId는 템플릿 값 유지 (예: 0 = 전체)
+    // groupId 는 템플릿 값 유지 (예: 0 = 전체)
     return u.toString();
   } catch {
     let url = API_TEMPLATE;
@@ -166,7 +154,7 @@ function buildPageUrl(page) {
 }
 
 // ───────────────────────────────────────────────
-// 🧹 응답 전처리
+// 🧹 네이버 응답 전처리
 // ───────────────────────────────────────────────
 
 function stripNaverPrefix(raw) {
@@ -228,9 +216,10 @@ async function fetchPagePosts(page) {
   let posts = list
     .map((item) => {
       const title = item.title || item.postTitle || "";
-      const blogIdRaw =
+      const blogId =
         item.blogId || item.blogNo || item.bloggerId || "";
-      const blogId = blogIdRaw ? String(blogIdRaw).trim() : "";
+
+      const blogIdStr = blogId ? String(blogId).trim() : "";
 
       const logNo =
         item.logNo || item.postId || item.articleId || null;
@@ -239,13 +228,15 @@ async function fetchPagePosts(page) {
         item.url ||
         item.postUrl ||
         item.blogPostUrl ||
-        (blogId && logNo
-          ? `https://blog.naver.com/${blogId}/${logNo}`
+        (blogIdStr && logNo
+          ? `https://blog.naver.com/${blogIdStr}/${logNo}`
           : "");
 
-      const meta = blogId ? BLOG_META_MAP[blogId] || {} : {};
+      const meta = blogIdStr
+        ? BLOG_META_MAP[blogIdStr] || null
+        : null;
 
-      if (blogId && !meta.groupNames) {
+      if (blogIdStr && (!meta || !meta.groupNames)) {
         missingMetaCount++;
       }
 
@@ -253,7 +244,6 @@ async function fetchPagePosts(page) {
         item.nickName ||
         item.bloggerName ||
         item.userName ||
-        meta.nickname ||
         "";
 
       const pubdate =
@@ -271,7 +261,7 @@ async function fetchPagePosts(page) {
         item.previewText ||
         "";
 
-      const groupName = meta.groupNames || ""; // CSV 있으면 사용
+      const groupName = meta?.groupNames || ""; // CSV에 있으면 전달
 
       const postId = logNo || null;
       if (!title || !link || !postId) return null;
@@ -282,20 +272,20 @@ async function fetchPagePosts(page) {
         nickname,
         pubdate,
         description,
-        blogId,
+        blogId: blogIdStr,
         postId,
-        groupName, // notion.js에서 Group multi-select로 사용
+        groupName,
       };
     })
     .filter(Boolean);
 
   if (missingMetaCount > 0) {
     console.log(
-      `ℹ️ ${page}페이지: CSV에 groupNames 없는 blogID ${missingMetaCount}건 (Group 미지정)`
+      `ℹ️ ${page}페이지: CSV에 groupNames 없는 blogId ${missingMetaCount}건 (Group 미지정)`
     );
   }
 
-  // 페이지 내: 오래된 글 → 최신 글 순
+  // 오래된 글 → 최신 글 순으로 Notion에 쌓기 위해 reverse
   posts = posts.reverse();
 
   return { posts };
@@ -307,7 +297,7 @@ async function fetchPagePosts(page) {
 
 async function main() {
   console.log(
-    "🚀 전체 이웃 새글 → Notion 스크랩 시작 (blogID/groupNames 기반)"
+    "🚀 전체 이웃 새글 → Notion 스크랩 시작 (CSV blogId/groupNames 매핑)"
   );
 
   let total = 0;
@@ -323,11 +313,9 @@ async function main() {
       } catch (err) {
         console.error("❌ Notion 저장 오류:", err.message);
       }
-      // 글 단위 딜레이 (Notion API 부하 완화)
       await new Promise((r) => setTimeout(r, 300));
     }
 
-    // 페이지 단위 딜레이
     await new Promise((r) => setTimeout(r, 500));
   }
 
