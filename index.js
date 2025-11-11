@@ -58,8 +58,7 @@ if (!API_TEMPLATE) {
  *   - blogID
  *   - groupNames
  *
- * 형식 기준으로:
- *  map[blogId] = { groupNames }
+ * map[blogId] = { groupNames, nickname }
  */
 function loadBlogMetaMap() {
   if (!fs.existsSync(CSV_PATH)) {
@@ -80,7 +79,6 @@ function loadBlogMetaMap() {
     const map = {};
 
     for (const row of records) {
-      // blogID 컬럼 우선 사용
       const blogIdRaw =
         row.blogID ||
         row.blogId ||
@@ -93,11 +91,9 @@ function loadBlogMetaMap() {
         row.ID;
 
       if (!blogIdRaw) continue;
-
       const blogId = String(blogIdRaw).trim();
       if (!blogId) continue;
 
-      // groupNames 컬럼 우선 사용
       const groupNamesRaw =
         row.groupNames ||
         row.groupName ||
@@ -107,7 +103,6 @@ function loadBlogMetaMap() {
         row.Group ||
         "";
 
-      // 닉네임이 CSV에 있다면 옵션으로 같이 써도 됨 (지금은 필수 아님)
       const nicknameRaw =
         row.nickname ||
         row.Nickname ||
@@ -156,6 +151,7 @@ function buildPageUrl(page) {
     return u.toString();
   } catch {
     let url = API_TEMPLATE;
+
     if (url.includes("page=")) {
       url = url.replace(/(page=)\d+/, `$1${page}`);
     } else if (url.includes("currentPage=")) {
@@ -164,6 +160,7 @@ function buildPageUrl(page) {
       const sep = url.includes("?") ? "&" : "?";
       url = `${url}${sep}page=${page}`;
     }
+
     return url;
   }
 }
@@ -232,4 +229,112 @@ async function fetchPagePosts(page) {
     .map((item) => {
       const title = item.title || item.postTitle || "";
       const blogIdRaw =
-        item
+        item.blogId || item.blogNo || item.bloggerId || "";
+      const blogId = blogIdRaw ? String(blogIdRaw).trim() : "";
+
+      const logNo =
+        item.logNo || item.postId || item.articleId || null;
+
+      const link =
+        item.url ||
+        item.postUrl ||
+        item.blogPostUrl ||
+        (blogId && logNo
+          ? `https://blog.naver.com/${blogId}/${logNo}`
+          : "");
+
+      const meta = blogId ? BLOG_META_MAP[blogId] || {} : {};
+
+      if (blogId && !meta.groupNames) {
+        missingMetaCount++;
+      }
+
+      const nickname =
+        item.nickName ||
+        item.bloggerName ||
+        item.userName ||
+        meta.nickname ||
+        "";
+
+      const pubdate =
+        item.addDate ||
+        item.postDate ||
+        item.writeDate ||
+        item.regDate ||
+        item.createdAt ||
+        null;
+
+      const description =
+        item.briefContents ||
+        item.summary ||
+        item.contentsPreview ||
+        item.previewText ||
+        "";
+
+      const groupName = meta.groupNames || ""; // CSV 있으면 사용
+
+      const postId = logNo || null;
+      if (!title || !link || !postId) return null;
+
+      return {
+        title,
+        link,
+        nickname,
+        pubdate,
+        description,
+        blogId,
+        postId,
+        groupName, // notion.js에서 Group multi-select로 사용
+      };
+    })
+    .filter(Boolean);
+
+  if (missingMetaCount > 0) {
+    console.log(
+      `ℹ️ ${page}페이지: CSV에 groupNames 없는 blogID ${missingMetaCount}건 (Group 미지정)`
+    );
+  }
+
+  // 페이지 내: 오래된 글 → 최신 글 순
+  posts = posts.reverse();
+
+  return { posts };
+}
+
+// ───────────────────────────────────────────────
+// 🚀 메인 실행
+// ───────────────────────────────────────────────
+
+async function main() {
+  console.log(
+    "🚀 전체 이웃 새글 → Notion 스크랩 시작 (blogID/groupNames 기반)"
+  );
+
+  let total = 0;
+
+  for (let page = MAX_PAGE; page >= 1; page--) {
+    const { posts } = await fetchPagePosts(page);
+    console.log(`📥 ${page}페이지 글 수: ${posts.length}`);
+    total += posts.length;
+
+    for (const post of posts) {
+      try {
+        await upsertPost(post);
+      } catch (err) {
+        console.error("❌ Notion 저장 오류:", err.message);
+      }
+      // 글 단위 딜레이 (Notion API 부하 완화)
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    // 페이지 단위 딜레이
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  console.log(`🎉 스크랩 완료 (총 ${total}건 처리 시도)`);
+}
+
+main().catch((err) => {
+  console.error("❌ 스크립트 전체 오류:", err);
+  process.exit(1);
+});
