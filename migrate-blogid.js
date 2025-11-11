@@ -29,8 +29,8 @@ if (!databaseId) {
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
 // ✅ Notion 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID_f'; // formula (기존 BlogID formula에서 이름만 변경했다고 가정)
-const TEXT_PROP_NAME = 'BlogID';      // text (여기에 최종 blogId 저장)
+const FORMULA_PROP_NAME = 'BlogID_f'; // formula
+const TEXT_PROP_NAME = 'BlogID';      // text
 const YEAR_PROP_NAME = '연도';
 const YEARMONTH_PROP_NAME = '연월';
 const QUARTER_PROP_NAME = '분기';
@@ -39,18 +39,29 @@ const GROUP_PROP_NAME = 'Group';      // CSV 기반 그룹 태그
 
 // ───────────────────────────────────────────────
 // 📥 neighbor-followings-result.csv → BlogID-Group 매핑
+//    실제 위치: migrate-blogid.js와 같은 폴더
 // ───────────────────────────────────────────────
-const csvPath = process.env.FOLLOWINGS_CSV_PATH
+const explicitCsvPath = process.env.FOLLOWINGS_CSV_PATH
   ? path.resolve(process.env.FOLLOWINGS_CSV_PATH)
-  : path.resolve(__dirname, '../neighbor-followings-result.csv');
+  : null;
+
+let csvPath = null;
+
+if (explicitCsvPath && fs.existsSync(explicitCsvPath)) {
+  csvPath = explicitCsvPath;
+} else {
+  const sameDirPath = path.resolve(__dirname, 'neighbor-followings-result.csv');
+  if (fs.existsSync(sameDirPath)) {
+    csvPath = sameDirPath;
+  }
+}
 
 const BLOGID_GROUP_MAP = new Map();
 
 (function loadBlogGroupMap() {
-  if (!fs.existsSync(csvPath)) {
+  if (!csvPath) {
     console.warn(
-      `⚠️ neighbor-followings-result.csv 없음: ${csvPath}\n` +
-        '   → Group 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
+      '⚠️ neighbor-followings-result.csv 를 찾지 못했습니다. → Group 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
     );
     return;
   }
@@ -64,22 +75,21 @@ const BLOGID_GROUP_MAP = new Map();
 
     let mapped = 0;
     for (const row of records) {
-      const blogIdRaw =
+      const blogId = String(
         row.blogId ||
-        row.blogid ||
-        row.BLOGID ||
-        row.BlogID ||
-        row.blog_id ||
-        '';
-      const groupRaw =
+          row.blogid ||
+          row.BLOGID ||
+          row.BlogID ||
+          row.blog_id ||
+          ''
+      ).trim();
+      const group = String(
         row.group ||
-        row.Group ||
-        row.groupName ||
-        row.GroupName ||
-        '';
-
-      const blogId = String(blogIdRaw || '').trim();
-      const group = String(groupRaw || '').trim();
+          row.Group ||
+          row.groupName ||
+          row.GroupName ||
+          ''
+      ).trim();
 
       if (!blogId || !group) continue;
 
@@ -88,7 +98,7 @@ const BLOGID_GROUP_MAP = new Map();
     }
 
     console.log(
-      `✅ CSV 로부터 BlogID-Group 매핑 ${BLOGID_GROUP_MAP.size}개 로드 (raw rows: ${records.length})`
+      `✅ CSV (${csvPath}) 에서 BlogID-Group 매핑 ${BLOGID_GROUP_MAP.size}개 로드 (rows: ${records.length})`
     );
   } catch (err) {
     console.error('❌ neighbor-followings-result.csv 파싱 실패:', err);
@@ -96,7 +106,7 @@ const BLOGID_GROUP_MAP = new Map();
 })();
 
 // ───────────────────────────────────────────────
-// 🔍 Formula 값 추출 (BlogID_f formula → string)
+// 유틸: Formula 값 추출
 // ───────────────────────────────────────────────
 function extractFormulaValue(formulaProp) {
   if (!formulaProp || formulaProp.type !== 'formula') return null;
@@ -110,7 +120,7 @@ function extractFormulaValue(formulaProp) {
   return null;
 }
 
-// rich_text → plain text
+// 유틸: rich_text → plain text
 function getPlainTextFromRichText(prop) {
   if (!prop || prop.type !== 'rich_text' || !prop.rich_text) return '';
   return prop.rich_text.map((r) => r.plain_text || '').join('').trim();
@@ -134,14 +144,9 @@ function extractYyYmQ(dateProp) {
   const month = d.getMonth() + 1;
   const mm = String(month).padStart(2, '0');
   const yearMonth = `${year}-${mm}`;
-
-  let q;
-  if (month <= 3) q = 'Q1';
-  else if (month <= 6) q = 'Q2';
-  else if (month <= 9) q = 'Q3';
-  else q = 'Q4';
-
+  const q = month <= 3 ? 'Q1' : month <= 6 ? 'Q2' : month <= 9 ? 'Q3' : 'Q4';
   const quarter = `${year}-${q}`;
+
   return { year, yearMonth, quarter };
 }
 
@@ -234,8 +239,7 @@ async function migrate() {
         : ' (업데이트 건수 제한 없음)')
   );
 
-  let cursor = undefined;
-
+  let cursor;
   let scanned = 0;
   let updatedPages = 0;
   let updatedBlogId = 0;
@@ -248,7 +252,7 @@ async function migrate() {
     const resp = await queryWithRetry({
       database_id: databaseId,
       start_cursor: cursor,
-      page_size: 50, // 안정성 위해 적당히
+      page_size: 50,
     });
 
     const pages = resp.results || [];
@@ -266,7 +270,7 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID_f formula → BlogID 텍스트 (빈 경우만)
+      // 1) BlogID_f → BlogID (빈 경우만)
       const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
       const blogIdText = getPlainTextFromRichText(props[TEXT_PROP_NAME]);
 
@@ -277,10 +281,9 @@ async function migrate() {
         updatedBlogId++;
       }
 
-      // effectiveBlogId: 우선 text, 없으면 formula
       const effectiveBlogId = (blogIdText || formulaValue || '').trim();
 
-      // 2) 원본 날짜 기반 연/연월/분기 (각 컬럼이 비어 있을 때만)
+      // 2) 연도/연월/분기 (각각 비어 있을 때만)
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
@@ -314,8 +317,8 @@ async function migrate() {
       }
 
       // 3) Group 동기화
-      // - CSV에 해당 blogId가 있을 때만 동작
-      // - 현재 Group 값과 "다를 경우에만" 덮어씀
+      // - CSV에 해당 blogId가 있을 때만
+      // - 현재 Group 값과 다를 때만 업데이트
       if (
         effectiveBlogId &&
         BLOGID_GROUP_MAP.size > 0 &&
@@ -326,7 +329,6 @@ async function migrate() {
           const currentGroup = getPlainTextFromRichText(
             props[GROUP_PROP_NAME]
           );
-
           if (currentGroup !== expectedGroup) {
             updates[GROUP_PROP_NAME] = {
               rich_text: [{ text: { content: expectedGroup } }],
@@ -336,19 +338,16 @@ async function migrate() {
         }
       }
 
-      // 실제로 바꿀 값이 있을 때만 업데이트
       if (Object.keys(updates).length > 0) {
         try {
           await safeUpdatePage(page.id, updates);
           updatedPages++;
         } catch {
-          // safeUpdatePage에서 로그 처리 → 계속 진행
+          // 로그는 safeUpdatePage에서 처리, 계속 진행
         }
 
-        // rate limit 완화
         await new Promise((r) => setTimeout(r, 80));
 
-        // MIGRATE_LIMIT 체크
         if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
           console.log(
             `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
