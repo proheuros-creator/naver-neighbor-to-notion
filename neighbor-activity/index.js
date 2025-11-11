@@ -331,30 +331,42 @@ async function main() {
 
     // 4) CSV 생성
     const header =
-  "blogId,blogUrl,groupIds,groupNames,isInfluencer,influencerId,influencerUrl\n";
+      "blogId,blogUrl,groupIds,groupNames,isInfluencer,influencerId,influencerUrl\n";
 
-const lines = neighbors.map((n) => {
-  const gids = Array.from(n.groupIds || []);
-  const gnames = gids
-    .map((id) => groupMap[id] || "")
-    .filter(Boolean)
-    .join("|");
+    const lines = neighbors.map((n) => {
+      const gids = Array.from(n.groupIds || []);
+      const gnames = gids
+        .map((id) => groupMap[id] || "")
+        .filter(Boolean)
+        .join("|");
 
-  return [
-    n.blogId,
-    n.blogUrl,
-    gids.join("|"),
-    gnames,
-    n.isInfluencer || "N",
-    n.influencerId || "",
-    n.influencerUrl || ""
-  ]
-    .map((v) =>
-      v != null ? String(v).replace(/"/g, '""') : ""
-    )
-    .map((v) => `"${v}"`)
-    .join(",");
-});
+      return [
+        n.blogId,
+        n.blogUrl,
+        gids.join("|"),
+        gnames,
+        n.isInfluencer || "N",
+        n.influencerId || "",
+        n.influencerUrl || ""
+      ]
+        .map((v) =>
+          v != null ? String(v).replace(/"/g, '""') : ""
+        )
+        .map((v) => `"${v}"`)
+        .join(",");
+    });
+
+    const csv = header + lines.join("\n");
+    await fs.writeFile(
+      "neighbor-followings-result.csv",
+      csv,
+      "utf8"
+    );
+    console.log("✅ Done. neighbor-followings-result.csv 생성 완료");
+  } catch (e) {
+    console.error("❌ Error:", e.message);
+    process.exit(1);
+  }
 }
 
 main();
