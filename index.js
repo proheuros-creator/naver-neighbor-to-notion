@@ -3,38 +3,53 @@
  * ───────────────────────────────────────────────
  * 🧭 네이버 블로그 이웃새글 → Notion 자동 스크랩 메인 실행 파일
  *
- * ✅ 작동 방식 (현재 버전)
- *  1. groups.js 에 정의된 모든 이웃그룹(GROUPS 배열)을 순회한다.
- *     - 각 원소: { id: groupId, name: "그룹이름" }
- *     - 이 배열 순서대로 스크랩이 진행된다.
- *  2. 각 그룹에 대해:
- *     - MAX_PAGE → 1 페이지까지 역순(최신 페이지부터 과거 페이지로) 순회
- *     - 각 페이지에서 BuddyPostList API 호출
- *     - 응답에서 title, blogId, postId, URL, 날짜, 닉네임, 요약을 파싱
- *     - 각 글에 groupName(이웃그룹 이름)을 붙여 notion.js 로 전달
- *  3. notion.js 의 upsertPost 가:
- *     - UniqueID = blogId_postId 기준으로 중복 체크
- *     - 이미 있으면 변경 여부 확인 후 update 또는 스킵
- *     - 없으면 새 페이지 생성
+ * ✅ 작동 방식 (새 버전)
+ *  1. NAVER_NEIGHBOR_API_URL (예: BlogHome.naver?directoryNo=0&currentPage=1&groupId=0)
+ *     를 템플릿으로 사용해, "전체 이웃 새글" 페이지를 MAX_PAGE까지 조회한다.
+ *     - page/currentPage 파라미터만 변경하여 1페이지부터 과거 페이지까지 순회
+ *     - groupId 기반 루프는 사용하지 않는다. (groupId=0 또는 템플릿 값 유지)
+ *  2. neighbor-followings-result.csv 를 읽어
+ *     각 blogId 에 대응하는 group, nickname 정보를 맵으로 구성한다.
+ *  3. 각 글을 파싱할 때:
+ *     - 응답에서 title, blogId, postId, URL, 날짜, 닉네임, 요약 추출
+ *     - CSV 매핑을 이용해 blogId 에 해당하는 group 을 찾아 groupName 으로 설정
+ *     - notion.js 의 upsertPost 로 전달
+ *  4. notion.js:
+ *     - UniqueID(blogId_postId) 기준으로 중복 체크
+ *     - Group(Text) 컬럼에 groupName 저장
  *
  * 🔐 전제 조건
- *  - NAVER_NEIGHBOR_API_URL 은 유효한 BuddyPostList 호출 URL이어야 한다.
- *    (예: https://section.blog.naver.com/ajax/BuddyPostList.naver?page=1&groupId=4 ...)
- *  - groups.js 에 정의된 groupId 들은 실제 네이버 이웃그룹의 ID와 일치해야 한다.
+ *  - NAVER_NEIGHBOR_API_URL:
+ *      "전체 이웃 새글"용 BlogHome/BuddyPostList 호출 URL 템플릿이어야 한다.
+ *      (예: https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=1&groupId=0)
+ *  - neighbor-followings-result.csv:
+ *      최소한 blogId 와 group(또는 Group/groupName 등) 컬럼을 포함해야 한다.
+ *      (blogId 기준으로 group 을 찾는다)
  */
 
 import "dotenv/config";
 import fetch from "node-fetch";
 import { upsertPost } from "./notion.js";
-import { GROUPS } from "./groups.js";
+
+import fs from "fs";
+import path from "path";
+import { parse } from "csv-parse/sync";
+import { fileURLToPath } from "url";
 
 // ───────────────────────────────────────────────
-// 🔧 환경변수 로드 & 검증
+// 📂 경로/환경 변수 설정
 // ───────────────────────────────────────────────
 
 const NAVER_COOKIE = process.env.NAVER_COOKIE;
 const API_TEMPLATE = process.env.NAVER_NEIGHBOR_API_URL;
 const MAX_PAGE = Number(process.env.MAX_PAGE || 150);
+
+// neighbor-followings-result.csv 위치
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const CSV_PATH =
+  process.env.NEIGHBOR_CSV_PATH ||
+  path.resolve(__dirname, "neighbor-followings-result.csv");
 
 if (!NAVER_COOKIE) {
   console.error("❌ NAVER_COOKIE 가 설정되어 있지 않습니다.");
@@ -47,17 +62,94 @@ if (!API_TEMPLATE) {
 }
 
 // ───────────────────────────────────────────────
-// 🏗 BuddyPostList URL 생성
+/**
+ * neighbor-followings-result.csv 로부터
+ * blogId → { group, nickname } 매핑 로드
+ *
+ * 지원 컬럼 예시:
+ *  - blogId / BLOGID / blog_id / Blog ID / id / ID
+ *  - group / Group / groupName / GroupName / 이웃그룹 / group_name
+ *  - nickname / Nickname / 닉네임
+ */
 // ───────────────────────────────────────────────
 
-/**
- * 특정 page, groupId 조합에 대한 API URL 생성
- *
- * - NAVER_NEIGHBOR_API_URL 을 템플릿으로 사용
- * - 내부에 page 또는 currentPage, groupId 파라미터가 있으면 교체
- * - 없으면 추가
- */
-function buildPageUrl(page, groupId) {
+function loadBlogMetaMap() {
+  if (!fs.existsSync(CSV_PATH)) {
+    console.warn(
+      `⚠️ neighbor-followings-result.csv 를 찾을 수 없습니다: ${CSV_PATH}`
+    );
+    return {};
+  }
+
+  try {
+    const csv = fs.readFileSync(CSV_PATH, "utf8");
+    const records = parse(csv, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    });
+
+    const map = {};
+
+    for (const row of records) {
+      const blogIdRaw =
+        row.blogId ||
+        row.BLOGID ||
+        row.blog_no ||
+        row.blogNo ||
+        row.blog_id ||
+        row["Blog ID"] ||
+        row.id ||
+        row.ID;
+
+      if (!blogIdRaw) continue;
+
+      const blogId = String(blogIdRaw).trim();
+      if (!blogId) continue;
+
+      const group =
+        row.group ||
+        row.Group ||
+        row.groupName ||
+        row.GroupName ||
+        row["이웃그룹"] ||
+        row.group_name ||
+        "";
+
+      const nickname =
+        row.nickname ||
+        row.Nickname ||
+        row.NICKNAME ||
+        row.nick ||
+        row["닉네임"] ||
+        "";
+
+      map[blogId] = {
+        group: group ? String(group).trim() : "",
+        nickname: nickname ? String(nickname).trim() : "",
+      };
+    }
+
+    console.log(
+      `✅ neighbor-followings-result.csv 로드 완료: ${Object.keys(map).length}개 blogId`
+    );
+    return map;
+  } catch (err) {
+    console.error(
+      "❌ neighbor-followings-result.csv 파싱 실패:",
+      err.message
+    );
+    return {};
+  }
+}
+
+const BLOG_META_MAP = loadBlogMetaMap();
+
+// ───────────────────────────────────────────────
+// 🏗 페이지 URL 생성 (page/currentPage만 변경)
+// ───────────────────────────────────────────────
+
+function buildPageUrl(page) {
   try {
     const u = new URL(API_TEMPLATE);
 
@@ -67,23 +159,19 @@ function buildPageUrl(page, groupId) {
     } else if (u.searchParams.has("currentPage")) {
       u.searchParams.set("currentPage", String(page));
     } else {
+      // 둘 다 없으면 page 추가
       u.searchParams.append("page", String(page));
     }
 
-    // groupId 교체 또는 추가
-    if (u.searchParams.has("groupId")) {
-      u.searchParams.set("groupId", String(groupId));
-    } else {
-      u.searchParams.append("groupId", String(groupId));
-    }
+    // ⚠️ groupId 는 템플릿 값 그대로 둔다 (예: 0 = 전체)
+    // 별도 groupId 루프는 사용하지 않는다.
 
     return u.toString();
   } catch (e) {
     // URL 객체 생성 실패 시 문자열 치환 fallback
     return API_TEMPLATE
       .replace(/(page=)\d+/, `$1${page}`)
-      .replace(/(currentPage=)\d+/, `$1${page}`)
-      .replace(/(groupId=)\d+/, `$1${groupId}`);
+      .replace(/(currentPage=)\d+/, `$1${page}`);
   }
 }
 
@@ -91,17 +179,10 @@ function buildPageUrl(page, groupId) {
 // 🧹 네이버 응답 전처리 & 디버그
 // ───────────────────────────────────────────────
 
-/**
- * 네이버 JSON 응답 앞의 보안 prefix 제거
- *  - 예: ")]}'," 같은 문자열 제거
- */
 function stripNaverPrefix(raw) {
   return raw.replace(/^\)\]\}',?\s*/, "");
 }
 
-/**
- * JSON 파싱 실패 시 앞부분만 잘라 보여주는 도우미
- */
 function cleanedPreview(raw) {
   const cleaned = stripNaverPrefix(raw || "");
   return cleaned.slice(0, 120) + (cleaned.length > 120 ? "..." : "");
@@ -112,17 +193,15 @@ function cleanedPreview(raw) {
 // ───────────────────────────────────────────────
 
 /**
- * 네이버 BuddyPostList API에서 특정 그룹/페이지의 글 목록을 가져온다.
+ * 네이버 BuddyPostList/BlogHome API에서
+ * 전체 이웃 새글 목록(해당 페이지)을 가져온다.
  *
- * @param {number} page       - 조회할 페이지 번호
- * @param {number} groupId    - 이웃 그룹 ID
- * @param {string} groupName  - 이웃 그룹 이름 (Notion Group 컬럼에 저장)
+ * @param {number} page - 조회할 페이지 번호
  * @returns {Promise<{posts: Array}>}
  */
-async function fetchPagePosts(page, groupId, groupName) {
-  const url = buildPageUrl(page, groupId);
+async function fetchPagePosts(page) {
+  const url = buildPageUrl(page);
 
-  // 쿠키 인증 포함 (로그인 기반 이웃 글 접근용)
   const res = await fetch(url, {
     headers: {
       "User-Agent": "Mozilla/5.0 (NaverNeighborScraper)",
@@ -132,10 +211,9 @@ async function fetchPagePosts(page, groupId, groupName) {
     },
   });
 
-  // HTTP 에러 처리
   if (!res.ok) {
     console.error(
-      `❌ [${groupName}] ${page}페이지 API 요청 실패:`,
+      `❌ ${page}페이지 API 요청 실패:`,
       res.status,
       res.statusText
     );
@@ -144,21 +222,16 @@ async function fetchPagePosts(page, groupId, groupName) {
 
   const raw = await res.text();
 
-  // JSON 파싱
   let data;
   try {
     const cleaned = stripNaverPrefix(raw);
     data = JSON.parse(cleaned);
   } catch (e) {
-    console.error(
-      `❌ [${groupName}] ${page}페이지 JSON 파싱 실패:`,
-      e.message
-    );
+    console.error(`❌ ${page}페이지 JSON 파싱 실패:`, e.message);
     console.error(cleanedPreview(raw));
     return { posts: [] };
   }
 
-  // 응답 구조에서 리스트 부분 추출 (버전에 따라 키가 다를 수 있어 안전하게 처리)
   const result = data.result || data;
   const list =
     result.buddyPostList ||
@@ -167,16 +240,16 @@ async function fetchPagePosts(page, groupId, groupName) {
     result.items ||
     [];
 
-  // 필요한 필드만 추출 → upsertPost 에 넘김
   let posts = list
     .map((item) => {
       const title = item.title || item.postTitle || "";
-      const blogId =
+      const blogIdRaw =
         item.blogId || item.blogNo || item.bloggerId || "";
+      const blogId = blogIdRaw ? String(blogIdRaw).trim() : "";
+
       const logNo =
         item.logNo || item.postId || item.articleId || null;
 
-      // 블로그 글 URL
       const link =
         item.url ||
         item.postUrl ||
@@ -185,10 +258,13 @@ async function fetchPagePosts(page, groupId, groupName) {
           ? `https://blog.naver.com/${blogId}/${logNo}`
           : "");
 
+      const meta = blogId ? BLOG_META_MAP[blogId] || {} : {};
+
       const nickname =
         item.nickName ||
         item.bloggerName ||
         item.userName ||
+        meta.nickname ||
         "";
 
       const pubdate =
@@ -206,9 +282,10 @@ async function fetchPagePosts(page, groupId, groupName) {
         item.previewText ||
         "";
 
+      const groupName = meta.group || ""; // ✅ CSV 기반 그룹명 매핑
+
       const postId = logNo || null;
 
-      // 필수 값이 없으면 스킵
       if (!title || !link || !postId) return null;
 
       return {
@@ -219,13 +296,13 @@ async function fetchPagePosts(page, groupId, groupName) {
         description,
         blogId,
         postId,
-        groupName, // ✅ 이 글이 어떤 이웃그룹에서 온 것인지 함께 넘김
+        groupName, // ✅ 이제 groupId 대신 CSV에서 가져온 그룹명
       };
     })
     .filter(Boolean);
 
-  // 네이버 응답은 일반적으로 "최신 → 과거" 이므로
-  // 우리는 페이지 내에서 "과거 → 최신" 순으로 저장하기 위해 뒤집음
+  // 네이버 응답: 일반적으로 최신 → 과거
+  // Notion에는 페이지 내에서 과거 → 최신 순으로 쌓기 위해 뒤집기
   posts = posts.reverse();
 
   return { posts };
@@ -237,49 +314,37 @@ async function fetchPagePosts(page, groupId, groupName) {
 
 /**
  * 전체 실행:
- *  - groups.js의 GROUPS 순서대로
- *  - 각 그룹에 대해 MAX_PAGE → 1 페이지까지 스크랩
- *  - 각 글은 notion.js의 upsertPost로 전달
+ *  - MAX_PAGE → 1 페이지까지 전체 이웃 새글 스크랩
+ *  - 각 글은 neighbor-followings-result.csv 기반 groupName 이 포함된 상태로 upsertPost 로 전달
  */
 async function main() {
-  console.log("🚀 BuddyPostList API → Notion 스크랩 시작 (모든 그룹)");
+  console.log(
+    "🚀 BlogHome/BuddyPostList → Notion 스크랩 시작 (전체 이웃, CSV 기반 그룹 매핑)"
+  );
 
-  for (const { id: groupId, name: groupName } of GROUPS) {
-    console.log(`📂 그룹 [${groupName}] (ID=${groupId}) 처리 시작`);
-    let total = 0;
+  let total = 0;
 
-    for (let page = MAX_PAGE; page >= 1; page--) {
-      const { posts } = await fetchPagePosts(page, groupId, groupName);
-      console.log(
-        `📥 ${page}페이지 (${groupName}) 글 수: ${posts.length}`
-      );
-      total += posts.length;
+  for (let page = MAX_PAGE; page >= 1; page--) {
+    const { posts } = await fetchPagePosts(page);
+    console.log(`📥 ${page}페이지 글 수: ${posts.length}`);
+    total += posts.length;
 
-      // 오래된 글 → 최신 글 순서로 업서트
-      for (const post of posts) {
-        try {
-          await upsertPost(post);
-        } catch (err) {
-          console.error(
-            `❌ Notion 저장 오류 (${groupName}):`,
-            err.message
-          );
-        }
-
-        // 글 단위 딜레이 (Notion API 부하 완화)
-        await new Promise((r) => setTimeout(r, 300));
+    for (const post of posts) {
+      try {
+        await upsertPost(post);
+      } catch (err) {
+        console.error(`❌ Notion 저장 오류:`, err.message);
       }
 
-      // 페이지 단위 딜레이
-      await new Promise((r) => setTimeout(r, 500));
+      // 글 단위 딜레이 (Notion API 부하 완화)
+      await new Promise((r) => setTimeout(r, 300));
     }
 
-    console.log(
-      `✅ 그룹 [${groupName}] 처리 완료 (총 ${total}건 처리 시도)`
-    );
+    // 페이지 단위 딜레이
+    await new Promise((r) => setTimeout(r, 500));
   }
 
-  console.log("🎉 모든 그룹 스크랩 완료");
+  console.log(`🎉 스크랩 완료 (총 ${total}건 처리 시도)`);
 }
 
 main().catch((err) => {
