@@ -6,6 +6,7 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,17 +16,17 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps
+      - name: Install dependencies
         working-directory: ./neighbor-activity
         run: npm install
 
-      - name: Run script
+      - name: Run neighbor activity scan
         working-directory: ./neighbor-activity
         env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 기존에 쓰던 이름
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 이미 쓰고 있는 시크릿 이름과 맞추기
         run: npm start
 
-      - name: Upload CSV
+      - name: Upload result CSV
         uses: actions/upload-artifact@v4
         with:
           name: neighbor-activity-result
