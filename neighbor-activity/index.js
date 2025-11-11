@@ -45,7 +45,7 @@ function extractBlogId(href) {
 
 /**
  * ViewMoreFollowings HTML에서 이웃 추가
- * - groupIdOrNull 있으면 해당 그룹 소속으로도 기록
+ * - blogId, blogUrl, nickname, groupIds 세팅
  */
 function collectFromFollowingsHtml(html, neighborsMap, groupIdOrNull) {
   const $ = cheerio.load(html);
@@ -55,12 +55,21 @@ function collectFromFollowingsHtml(html, neighborsMap, groupIdOrNull) {
     const blogId = extractBlogId(href);
     if (!blogId) return;
 
+    // 링크 텍스트를 닉네임 후보로 사용
+    const linkText = ($(el).text() || "").trim();
+
     if (!neighborsMap.has(blogId)) {
       neighborsMap.set(blogId, {
         blogId,
         blogUrl: `https://blog.naver.com/${blogId}`,
+        nickname: linkText || "",
         groupIds: new Set()
       });
+    } else {
+      const n = neighborsMap.get(blogId);
+      if (!n.nickname && linkText) {
+        n.nickname = linkText;
+      }
     }
 
     if (groupIdOrNull != null) {
@@ -100,16 +109,12 @@ async function collectAllNeighbors() {
   const neighbors = new Map();
 
   for (let page = 1; page <= maxPages; page++) {
-    console.log(
-      `📥 [ALL] Fetch neighbors page ${page}`
-    );
+    console.log(`📥 [ALL] Fetch neighbors page ${page}`);
     let html;
     try {
       html = await fetchFollowingsPage({ page, groupId: null });
     } catch (e) {
-      console.warn(
-        `   ⚠️ [ALL] Page ${page} load failed: ${e.message}`
-      );
+      console.warn(`   ⚠️ [ALL] Page ${page} load failed: ${e.message}`);
       break;
     }
 
@@ -150,9 +155,7 @@ async function enrichWithGroups(neighbors, groupList) {
   for (const g of groupList) {
     const gid = g.id;
     for (let page = 1; page <= maxPages; page++) {
-      console.log(
-        `📥 [GROUP ${gid}] ${g.name} - page ${page}`
-      );
+      console.log(`📥 [GROUP ${gid}] ${g.name} - page ${page}`);
 
       let html;
       try {
@@ -174,9 +177,7 @@ async function enrichWithGroups(neighbors, groupList) {
       );
 
       if (page > 1 && added === 0) {
-        console.log(
-          `   ⛔ [GROUP ${gid}] No new members. Stop.`
-        );
+        console.log(`   ⛔ [GROUP ${gid}] No new members. Stop.`);
         break;
       }
 
@@ -195,106 +196,139 @@ function countGroupMembers(neighbors, gid) {
 }
 
 /**
- * 3단계: 인플루언서 여부 확인
- * 인플루언서 여부 & 인플루언서 ID/URL 탐지
- *
- * 우선순위:
- *  1) 블로그 HTML 안에서 in.naver.com/{handle} 링크 찾기
- *  2) 없으면 in.naver.com/{blogId} 직접 확인 (동일 ID인 케이스용)
+ * 주어진 handle이 실제 인플루언서 페이지인지, 그리고 (옵션) 특정 blogId와 연결되는지 확인
  */
-async function detectInfluencerForBlog(blogId) {
-  const blogUrl = `https://blog.naver.com/${blogId}`;
-  let influencerId = null;
-
-  // 1차: 블로그 메인 HTML에서 in.naver.com 링크 탐색
+async function verifyInfluencerHandle(handle, blogId) {
+  const url = `https://in.naver.com/${handle}`;
   try {
-    const res = await axios.get(blogUrl, {
-      maxRedirects: 5,
+    const res = await axios.get(url, {
+      maxRedirects: 0,
+      validateStatus: (s) => s === 200 || (s >= 300 && s < 400),
       headers: { "User-Agent": UA }
     });
 
-    const html = res.data;
+    if (res.status !== 200) return null;
+
+    const body =
+      typeof res.data === "string"
+        ? res.data
+        : (res.data || "").toString();
+
+    const looksInfluencer =
+      body.includes("인플루언서") ||
+      body.toLowerCase().includes("influencer") ||
+      body.includes("in.naver.com");
+
+    if (!looksInfluencer) return null;
+
+    // blogId가 주어지면, 그 블로그와 연결 흔적이 있는지 확인
+    if (blogId) {
+      const hasBlogLink =
+        body.includes(`blog.naver.com/${blogId}`) ||
+        body.includes(`"${blogId}"`) ||
+        body.includes(`'${blogId}'`);
+      if (!hasBlogLink && handle !== blogId) {
+        // handle == blogId 인 케이스는 허용, 아니면 연결 없으면 패스
+        return null;
+      }
+    }
+
+    return { handle, url };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 닉네임으로 네이버 통합검색 → 인플 후보 handle 찾기
+ * - "네이버 인플루언서" + in.naver.com/{handle} 있는 카드에서 nickname과 함께 있는 것 찾기
+ * - 찾으면 handle 검증(verifyInfluencerHandle)까지 수행
+ */
+async function findInfluencerHandleByNickname(nickname, blogId) {
+  if (!nickname) return null;
+
+  const q = encodeURIComponent(nickname);
+  const searchUrl = `https://search.naver.com/search.naver?query=${q}`;
+
+  try {
+    const res = await axios.get(searchUrl, {
+      headers: { "User-Agent": UA }
+    });
+
+    const html =
+      typeof res.data === "string"
+        ? res.data
+        : (res.data || "").toString();
     const $ = cheerio.load(html);
 
-    // a 태그 href에서 in.naver.com/{handle} 찾기
+    let candidateHandle = null;
+
     $("a[href*='in.naver.com/']").each((_, el) => {
-      if (influencerId) return; // 첫 번째만 사용
-      let href = $(el).attr("href") || "";
-      if (!href) return;
+      if (candidateHandle) return;
 
-      if (href.startsWith("//")) href = "https:" + href;
-      if (!href.startsWith("http")) {
-        // 상대경로 비슷하면 스킵
-        return;
-      }
-
+      const href = $(el).attr("href") || "";
       const m = href.match(/in\.naver\.com\/([^\/\?\s]+)/);
-      if (m && m[1]) {
-        const handle = m[1].trim();
-        // 너무 짧거나 이상한 값 필터링 가능하지만 일단 그대로 사용
-        influencerId = handle;
+      if (!m || !m[1]) return;
+
+      const handle = m[1].trim();
+      if (!handle) return;
+
+      // 주변 블럭 텍스트에 "네이버 인플루언서"와 닉네임이 같이 있는지 확인
+      const $block = $(el).closest("div, li, article, section");
+      const text = ($block.text() || "").trim();
+
+      if (
+        text.includes("네이버 인플루언서") &&
+        text.includes(nickname)
+      ) {
+        candidateHandle = handle;
       }
     });
 
-    // 혹시 HTML 안에 '인플루언서' / 'Influencer' 관련 표시만 있어도
-    // (근데 handle이 없으면 매핑을 못 하니까 여기서는 Y만 주고 ID는 비워둘 수도 있음)
-    if (!influencerId) {
-      if (
-        html.includes("in.naver.com") &&
-        (html.includes("인플루언서") ||
-          html.toLowerCase().includes("influencer"))
-      ) {
-        // 링크는 있는데 파싱을 못한 특이 케이스일 수 있으므로
-        // 일단 isInfluencer=Y로만 처리하고, id는 비워둘 수도 있다.
-        return {
-          isInfluencer: "Y",
-          influencerId: "",
-          influencerUrl: ""
-        };
-      }
-    }
+    if (!candidateHandle) return null;
+
+    const verified = await verifyInfluencerHandle(candidateHandle, blogId);
+    return verified ? verified.handle : null;
   } catch (e) {
-    // 블로그 로딩 실패 시, 아래 fallback만 사용
+    return null;
   }
+}
 
-  // 2차: 그래도 못 찾았고, blogId와 인플 ID가 동일한 케이스를 커버하고 싶으면
-  if (!influencerId) {
-    const candidate = blogId;
-    const url = `https://in.naver.com/${candidate}`;
-    try {
-      const res = await axios.get(url, {
-        maxRedirects: 0,
-        validateStatus: (s) => s === 200 || (s >= 300 && s < 400),
-        headers: { "User-Agent": UA }
-      });
-
-      if (res.status === 200) {
-        const body =
-          typeof res.data === "string"
-            ? res.data
-            : (res.data || "").toString();
-
-        if (
-          body.includes("인플루언서") ||
-          body.toLowerCase().includes("influencer") ||
-          body.includes("in.naver.com")
-        ) {
-          influencerId = candidate;
-        }
-      }
-    } catch (e) {
-      // 404 등은 그냥 N
-    }
-  }
-
-  if (influencerId) {
+/**
+ * blogId + nickname 기준 인플루언서 여부 판별
+ *
+ * 1) in.naver.com/{blogId} 직접 확인 (handle == blogId)
+ * 2) 닉네임으로 네이버 검색 → 인플 후보 handle 찾기 → 그 handle 페이지에서 blogId 연결 확인
+ *    (막히거나 구조 달라서 실패하면 그냥 N 처리)
+ */
+async function detectInfluencerForBlog(blogId, nickname) {
+  // 1) blogId와 handle이 동일한 경우
+  const direct = await verifyInfluencerHandle(blogId, blogId);
+  if (direct) {
     return {
       isInfluencer: "Y",
-      influencerId,
-      influencerUrl: `https://in.naver.com/${influencerId}`
+      influencerId: direct.handle,
+      influencerUrl: direct.url
     };
   }
 
+  // 2) 닉네임 기반 매칭 시도 (실패해도 N으로 처리)
+  const handleFromNickname = await findInfluencerHandleByNickname(
+    nickname,
+    blogId
+  );
+  if (handleFromNickname) {
+    const verified = await verifyInfluencerHandle(handleFromNickname, blogId);
+    if (verified) {
+      return {
+        isInfluencer: "Y",
+        influencerId: verified.handle,
+        influencerUrl: verified.url
+      };
+    }
+  }
+
+  // 자동으로 확신할 수 없으면 보수적으로 N
   return {
     isInfluencer: "N",
     influencerId: "",
@@ -314,15 +348,15 @@ async function main() {
 
     // 2) 그룹 멤버십
     await enrichWithGroups(neighborsMap, groupList);
-    
+
     // 3) 인플루언서 여부 + 인플루언서 ID/URL
     const neighbors = Array.from(neighborsMap.values());
     for (let i = 0; i < neighbors.length; i++) {
       const n = neighbors[i];
       console.log(
-        `⭐ [${i + 1}/${neighbors.length}] Detect influencer for: ${n.blogId}`
+        `⭐ [${i + 1}/${neighbors.length}] Detect influencer for: ${n.blogId} (${n.nickname || ""})`
       );
-      const info = await detectInfluencerForBlog(n.blogId);
+      const info = await detectInfluencerForBlog(n.blogId, n.nickname);
       n.isInfluencer = info.isInfluencer;
       n.influencerId = info.influencerId;
       n.influencerUrl = info.influencerUrl;
@@ -331,7 +365,7 @@ async function main() {
 
     // 4) CSV 생성
     const header =
-      "blogId,blogUrl,groupIds,groupNames,isInfluencer,influencerId,influencerUrl\n";
+      "blogId,blogUrl,nickname,groupIds,groupNames,isInfluencer,influencerId,influencerUrl\n";
 
     const lines = neighbors.map((n) => {
       const gids = Array.from(n.groupIds || []);
@@ -343,6 +377,7 @@ async function main() {
       return [
         n.blogId,
         n.blogUrl,
+        n.nickname || "",
         gids.join("|"),
         gnames,
         n.isInfluencer || "N",
