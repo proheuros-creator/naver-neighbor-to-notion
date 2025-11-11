@@ -28,3 +28,12 @@ jobs:
         with:
           name: neighbor-followings-result
           path: neighbor-activity/neighbor-followings-result.csv
+          
+      - name: Commit result CSV to repo
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          cp neighbor-activity/neighbor-followings-result.csv ./neighbor-followings-result.csv
+          git add neighbor-followings-result.csv
+          git commit -m "Add neighbor followings result [skip ci]" || echo "No changes"
+          git push
