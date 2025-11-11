@@ -1,10 +1,13 @@
 // BlogID/sync-blogid-from-csv.js
-import fs from "fs";
-import path from "path";
+const fs = require("fs");
+const path = require("path");
+const { Client } = require("@notionhq/client");
+const { parse } = require("csv-parse/sync");
 
+// CSV 경로 처리
 const csvPath = process.argv[2]
   ? path.resolve(process.argv[2])
-  : path.resolve("../neighbor-followings-result.csv");
+  : path.resolve(__dirname, "../neighbor-followings-result.csv");
 
 if (!fs.existsSync(csvPath)) {
   console.error(`❌ CSV not found at ${csvPath}`);
@@ -12,9 +15,6 @@ if (!fs.existsSync(csvPath)) {
 }
 
 console.log(`✅ CSV found at ${csvPath}`);
-const fs = require("fs");
-const { Client } = require("@notionhq/client");
-const { parse } = require("csv-parse/sync");
 
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 const databaseId = process.env.NOTION_BLOGID_DB;
@@ -67,20 +67,15 @@ async function upsertBlogIdRow(row) {
           text: { content: blogId }
         }
       ]
-    }
+    },
+    isInfluencer: { checkbox: isInfluencer }
   };
 
-  if (blogUrl) {
-    properties.blogUrl = { url: blogUrl };
-  }
+  if (blogUrl) properties.blogUrl = { url: blogUrl };
 
   if (nickname) {
     properties.nickname = {
-      rich_text: [
-        {
-          text: { content: nickname }
-        }
-      ]
+      rich_text: [{ text: { content: nickname } }]
     };
   }
 
@@ -88,25 +83,15 @@ async function upsertBlogIdRow(row) {
     properties.groupNames = {
       multi_select: groupNames.map((name) => ({ name }))
     };
-  } else {
-    // 비워두고 싶으면 multi_select: [] 도 가능
   }
-
-  properties.isInfluencer = { checkbox: isInfluencer };
 
   if (influencerId) {
     properties.influencerId = {
-      rich_text: [
-        {
-          text: { content: influencerId }
-        }
-      ]
+      rich_text: [{ text: { content: influencerId } }]
     };
   }
 
-  if (influencerUrl) {
-    properties.influencerUrl = { url: influencerUrl };
-  }
+  if (influencerUrl) properties.influencerUrl = { url: influencerUrl };
 
   if (existing.results.length > 0) {
     const pageId = existing.results[0].id;
@@ -125,12 +110,6 @@ async function upsertBlogIdRow(row) {
 }
 
 async function main() {
-  const csvPath = "neighbor-followings-result.csv";
-  if (!fs.existsSync(csvPath)) {
-    console.error(`❌ CSV not found at ${csvPath}`);
-    process.exit(1);
-  }
-
   const csvText = fs.readFileSync(csvPath, "utf8");
   const records = parse(csvText, {
     columns: true,
