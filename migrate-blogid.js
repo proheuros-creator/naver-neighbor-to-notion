@@ -7,11 +7,11 @@ import { fileURLToPath } from 'url';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
-// ✅ ESM 환경에서 __dirname 설정
+// ESM용 __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ 마이그레이션 대상 DB 선택 우선순위
+// ✅ 마이그레이션 대상 DB
 const databaseId =
   process.env.MIGRATE_DATABASE_ID ||
   process.env.NOTION_DATABASE_ID ||
@@ -25,17 +25,17 @@ if (!databaseId) {
   process.exit(1);
 }
 
-// 이번 실행에서 "실제로 업데이트할 최대 건수" (0이면 제한 없음)
+// ✅ 이번 실행에서 실제 업데이트 최대 건수 (0 = 제한 없음)
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
-// Notion 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID_f'; // 기존: BlogID, 변경: BlogID_f (formula)
-const TEXT_PROP_NAME = 'BlogID';      // 기존: ID, 변경: BlogID (text)
+// ✅ Notion 속성 이름들
+const FORMULA_PROP_NAME = 'BlogID_f'; // formula (기존 BlogID formula에서 이름만 변경했다고 가정)
+const TEXT_PROP_NAME = 'BlogID';      // text (여기에 최종 blogId 저장)
 const YEAR_PROP_NAME = '연도';
 const YEARMONTH_PROP_NAME = '연월';
 const QUARTER_PROP_NAME = '분기';
 const DATE_PROP_NAME = '원본 날짜';
-const GROUP_PROP_NAME = 'Group';      // CSV 기반으로 채울 Group 컬럼
+const GROUP_PROP_NAME = 'Group';      // CSV 기반 그룹 태그
 
 // ───────────────────────────────────────────────
 // 📥 neighbor-followings-result.csv → BlogID-Group 매핑
@@ -49,15 +49,14 @@ const BLOGID_GROUP_MAP = new Map();
 (function loadBlogGroupMap() {
   if (!fs.existsSync(csvPath)) {
     console.warn(
-      `⚠️ neighbor-followings-result.csv 를 찾지 못했습니다: ${csvPath}\n` +
-        '   → Group 매핑 없이 BlogID 마이그레이션만 수행합니다.'
+      `⚠️ neighbor-followings-result.csv 없음: ${csvPath}\n` +
+        '   → Group 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
     );
     return;
   }
 
   try {
-    const file = fs.readFileSync(csvPath);
-    const records = parse(file, {
+    const records = parse(fs.readFileSync(csvPath), {
       columns: true,
       skip_empty_lines: true,
       trim: true,
@@ -84,7 +83,6 @@ const BLOGID_GROUP_MAP = new Map();
 
       if (!blogId || !group) continue;
 
-      // 동일 blogId가 여러 번 나오면 마지막 값 기준 (필요시 여기서 조건 조정 가능)
       BLOGID_GROUP_MAP.set(blogId, group);
       mapped++;
     }
@@ -110,6 +108,12 @@ function extractFormulaValue(formulaProp) {
   if (f.type === 'boolean') return String(f.boolean);
   if (f.type === 'date' && f.date?.start) return f.date.start;
   return null;
+}
+
+// rich_text → plain text
+function getPlainTextFromRichText(prop) {
+  if (!prop || prop.type !== 'rich_text' || !prop.rich_text) return '';
+  return prop.rich_text.map((r) => r.plain_text || '').join('').trim();
 }
 
 // ───────────────────────────────────────────────
@@ -142,7 +146,7 @@ function extractYyYmQ(dateProp) {
 }
 
 // ───────────────────────────────────────────────
-// 🔁 databases.query 재시도 (타임아웃/일시 오류 방어)
+// 🔁 databases.query 재시도
 // ───────────────────────────────────────────────
 async function queryWithRetry(params, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -170,7 +174,7 @@ async function queryWithRetry(params, retries = 3) {
         throw err;
       }
 
-      const delay = 1000 * attempt; // 1s, 2s, 3s
+      const delay = 1000 * attempt;
       console.log(`⏳ ${delay / 1000}s 대기 후 databases.query 재시도...`);
       await new Promise((r) => setTimeout(r, delay));
     }
@@ -178,7 +182,7 @@ async function queryWithRetry(params, retries = 3) {
 }
 
 // ───────────────────────────────────────────────
-// 🔁 페이지 업데이트 재시도 (rate limit/네트워크)
+// 🔁 페이지 업데이트 재시도
 // ───────────────────────────────────────────────
 async function safeUpdatePage(pageId, properties, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -224,7 +228,7 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
-    `🚀 BlogID_f → BlogID + 연도/연월/분기 + Group 마이그레이션 시작` +
+    `🚀 BlogID_f → BlogID + 연도/연월/분기 + Group(sync) 마이그레이션 시작` +
       (MIGRATE_LIMIT
         ? ` (이번 실행 최대 ${MIGRATE_LIMIT}건 업데이트)`
         : ' (업데이트 건수 제한 없음)')
@@ -240,25 +244,11 @@ async function migrate() {
   let updatedQuarter = 0;
   let updatedGroup = 0;
 
-  // ✅ "아직 마이그레이션 안 된 페이지" + Group 비어있는 페이지 대상으로 필터
-  const baseFilter = {
-    or: [
-      { property: TEXT_PROP_NAME, rich_text: { is_empty: true } },
-      { property: YEAR_PROP_NAME, rich_text: { is_empty: true } },
-      { property: YEARMONTH_PROP_NAME, rich_text: { is_empty: true } },
-      { property: QUARTER_PROP_NAME, rich_text: { is_empty: true } },
-      { property: GROUP_PROP_NAME, rich_text: { is_empty: true } },
-    ],
-  };
-
-  console.log('🔍 첫 batch 조회 시작 (databases.query)...');
-
-  mainLoop: while (true) {
+  while (true) {
     const resp = await queryWithRetry({
       database_id: databaseId,
       start_cursor: cursor,
-      page_size: 50, // 작게 유지해서 안정성 확보
-      filter: baseFilter,
+      page_size: 50, // 안정성 위해 적당히
     });
 
     const pages = resp.results || [];
@@ -276,46 +266,26 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID_f formula → BlogID 텍스트
-      let blogIdFromFormula = null;
+      // 1) BlogID_f formula → BlogID 텍스트 (빈 경우만)
+      const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
+      const blogIdText = getPlainTextFromRichText(props[TEXT_PROP_NAME]);
 
-      if (props[FORMULA_PROP_NAME] && props[TEXT_PROP_NAME]) {
-        blogIdFromFormula = extractFormulaValue(props[FORMULA_PROP_NAME]);
-        const textProp = props[TEXT_PROP_NAME];
-        const hasText =
-          textProp.type === 'rich_text' && textProp.rich_text.length > 0;
-
-        if (blogIdFromFormula && !hasText) {
-          updates[TEXT_PROP_NAME] = {
-            rich_text: [{ text: { content: blogIdFromFormula } }],
-          };
-          updatedBlogId++;
-        }
+      if (formulaValue && !blogIdText) {
+        updates[TEXT_PROP_NAME] = {
+          rich_text: [{ text: { content: formulaValue } }],
+        };
+        updatedBlogId++;
       }
 
-      // ✅ effectiveBlogId: 우선 text BlogID, 없으면 formula 값
-      let effectiveBlogId = null;
-      const textProp = props[TEXT_PROP_NAME];
-      if (
-        textProp &&
-        textProp.type === 'rich_text' &&
-        textProp.rich_text.length > 0
-      ) {
-        effectiveBlogId = textProp.rich_text
-          .map((r) => r.plain_text || '')
-          .join('')
-          .trim();
-      } else if (blogIdFromFormula) {
-        effectiveBlogId = blogIdFromFormula.trim();
-      }
+      // effectiveBlogId: 우선 text, 없으면 formula
+      const effectiveBlogId = (blogIdText || formulaValue || '').trim();
 
-      // 2) 원본 날짜 기반 연/연월/분기
+      // 2) 원본 날짜 기반 연/연월/분기 (각 컬럼이 비어 있을 때만)
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
-        const p = props[YEAR_PROP_NAME];
-        const has = p.type === 'rich_text' && p.rich_text.length > 0;
-        if (!has) {
+        const cur = getPlainTextFromRichText(props[YEAR_PROP_NAME]);
+        if (!cur) {
           updates[YEAR_PROP_NAME] = {
             rich_text: [{ text: { content: year } }],
           };
@@ -324,9 +294,8 @@ async function migrate() {
       }
 
       if (yearMonth && props[YEARMONTH_PROP_NAME]) {
-        const p = props[YEARMONTH_PROP_NAME];
-        const has = p.type === 'rich_text' && p.rich_text.length > 0;
-        if (!has) {
+        const cur = getPlainTextFromRichText(props[YEARMONTH_PROP_NAME]);
+        if (!cur) {
           updates[YEARMONTH_PROP_NAME] = {
             rich_text: [{ text: { content: yearMonth } }],
           };
@@ -335,9 +304,8 @@ async function migrate() {
       }
 
       if (quarter && props[QUARTER_PROP_NAME]) {
-        const p = props[QUARTER_PROP_NAME];
-        const has = p.type === 'rich_text' && p.rich_text.length > 0;
-        if (!has) {
+        const cur = getPlainTextFromRichText(props[QUARTER_PROP_NAME]);
+        if (!cur) {
           updates[QUARTER_PROP_NAME] = {
             rich_text: [{ text: { content: quarter } }],
           };
@@ -345,61 +313,61 @@ async function migrate() {
         }
       }
 
-      // 3) BlogID 기반 Group 매핑
+      // 3) Group 동기화
+      // - CSV에 해당 blogId가 있을 때만 동작
+      // - 현재 Group 값과 "다를 경우에만" 덮어씀
       if (
         effectiveBlogId &&
         BLOGID_GROUP_MAP.size > 0 &&
         props[GROUP_PROP_NAME]
       ) {
-        const groupValue = BLOGID_GROUP_MAP.get(effectiveBlogId);
-        if (groupValue) {
-          const g = props[GROUP_PROP_NAME];
-          const has =
-            g.type === 'rich_text' && g.rich_text.length > 0;
-          if (!has) {
+        const expectedGroup = BLOGID_GROUP_MAP.get(effectiveBlogId);
+        if (expectedGroup) {
+          const currentGroup = getPlainTextFromRichText(
+            props[GROUP_PROP_NAME]
+          );
+
+          if (currentGroup !== expectedGroup) {
             updates[GROUP_PROP_NAME] = {
-              rich_text: [{ text: { content: groupValue } }],
+              rich_text: [{ text: { content: expectedGroup } }],
             };
             updatedGroup++;
           }
         }
       }
 
-      // 실제로 바꿀 값이 있을 때만 Notion 업데이트
+      // 실제로 바꿀 값이 있을 때만 업데이트
       if (Object.keys(updates).length > 0) {
         try {
           await safeUpdatePage(page.id, updates);
+          updatedPages++;
         } catch {
-          // safeUpdatePage 안에서 이미 로그 출력 & 포기 처리 → 여기서는 계속 진행
+          // safeUpdatePage에서 로그 처리 → 계속 진행
         }
-        updatedPages++;
 
-        // 부하 완화
+        // rate limit 완화
         await new Promise((r) => setTimeout(r, 80));
+
+        // MIGRATE_LIMIT 체크
+        if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
+          console.log(
+            `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
+          );
+          console.log(
+            `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
+          );
+          return;
+        }
       }
 
-      // 진행 상황 로그
       if (scanned % 500 === 0) {
         console.log(
           `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
         );
       }
-
-      // MIGRATE_LIMIT 도달 시 종료
-      if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
-        console.log(
-          `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
-        );
-        console.log(
-          `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
-        );
-        return;
-      }
     }
 
-    if (!resp.has_more) {
-      break;
-    }
+    if (!resp.has_more) break;
     cursor = resp.next_cursor;
   }
 
