@@ -1,5 +1,3 @@
-// neighbor-activity/index.js
-
 const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs").promises;
@@ -10,23 +8,28 @@ const UA =
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// href에서 blogId 추출
-function extractBlogId(href) {
+/**
+ * 순수 블로그 주소 형태만 blogId로 인정:
+ *  - https://blog.naver.com/{id}
+ *  - {id}는 영문/숫자/_/- 만 ('.' 들어가면 네이버 기능 URL일 확률 높아서 제외)
+ */
+function extractPureBlogIdFromHref(href) {
   if (!href) return null;
 
-  const direct = href.match(/blog\.naver\.com\/([a-zA-Z0-9._-]+)/);
-  if (direct) return direct[1];
+  // 절대 URL 패턴
+  const m1 = href.match(/^https?:\/\/blog\.naver\.com\/([A-Za-z0-9_-]+)$/);
+  if (m1) return m1[1];
 
-  const param = href.match(/blogId=([a-zA-Z0-9._-]+)/);
-  if (param) return param[1];
+  // 쿼리형 (?blogId=xxx)도 허용하되, id에 '.' 있으면 버림
+  const m2 = href.match(/blogId=([A-Za-z0-9_-]+)/);
+  if (m2) return m2[1];
 
   return null;
 }
 
 /**
- * 1단계: Buddy 관리 페이지에서 1페이지, 2페이지... 순서대로 호출하며 이웃 blogId 수집
- * - 브라우저에서 주소가 안 바뀌더라도, 백엔드가 currentPage 파라미터를 쓰는 경우를 활용
- * - 각 페이지에서 새로 나오는 blogId가 없으면 조기 종료
+ * AdminMain 에서 실제 이웃 목록 페이지(BuddyListManage)를 찾아서
+ * 그걸 기준으로 페이지네이션을 돌린다.
  */
 async function fetchNeighborBlogIds() {
   const cookie = process.env.NAVER_COOKIE;
@@ -34,71 +37,113 @@ async function fetchNeighborBlogIds() {
     throw new Error("NAVER_COOKIE secret이 설정되어 있지 않습니다.");
   }
 
-  const allIds = new Set();
-  let lastSize = 0;
+  console.log(`📥 Load admin main: ${adminBuddyUrl}`);
+  const mainRes = await axios.get(adminBuddyUrl, {
+    headers: {
+      "User-Agent": UA,
+      Cookie: cookie
+    }
+  });
+  const $main = cheerio.load(mainRes.data);
 
-  for (let page = 1; page <= maxPages; page++) {
-    const url =
-      page === 1
-        ? adminBuddyUrl
-        : `${adminBuddyUrl}&currentPage=${page}`;
+  // 1) AdminMain 안에서 BuddyListManage.naver 링크 또는 iframe/src 찾기
+  let firstBuddyUrl = null;
 
-    console.log(`📥 Fetch neighbors from page ${page}: ${url}`);
+  const pickBuddyUrl = (raw, base) => {
+    if (!raw) return;
+    if (!raw.includes("BuddyListManage.naver")) return;
+    const abs = raw.startsWith("http")
+      ? raw
+      : new URL(raw, base).toString();
+    if (!firstBuddyUrl) firstBuddyUrl = abs;
+  };
 
+  $main("a[href*='BuddyListManage.naver']").each((_, el) => {
+    pickBuddyUrl($main(el).attr("href"), adminBuddyUrl);
+  });
+
+  $main("iframe, frame, script").each((_, el) => {
+    const src = $main(el).attr("src");
+    if (src && src.includes("BuddyListManage.naver")) {
+      pickBuddyUrl(src, adminBuddyUrl);
+    }
+  });
+
+  if (!firstBuddyUrl) {
+    throw new Error(
+      "BuddyListManage.naver URL을 AdminMain 페이지에서 찾지 못했습니다. HTML 구조가 바뀐 것 같습니다."
+    );
+  }
+
+  console.log(`🔗 Detected buddy list base: ${firstBuddyUrl}`);
+
+  // 2) BuddyListManage.naver 페이지들을 BFS로 순회
+  const toVisit = new Set([firstBuddyUrl]);
+  const visited = new Set();
+  const blogIds = new Set();
+  let pageCount = 0;
+
+  while (toVisit.size > 0) {
+    const url = [...toVisit][0];
+    toVisit.delete(url);
+    if (visited.has(url)) continue;
+    visited.add(url);
+
+    pageCount++;
+    if (pageCount > maxPages) {
+      console.log("⛔ maxPages 도달, 페이지 순회 중단");
+      break;
+    }
+
+    console.log(`📄 Buddy page ${pageCount}: ${url}`);
+
+    let res;
     try {
-      const res = await axios.get(url, {
+      res = await axios.get(url, {
         headers: {
           "User-Agent": UA,
           Cookie: cookie
         }
       });
-
-      const $ = cheerio.load(res.data);
-
-      // 이 페이지에서 blogId 추출
-      $("a[href*='blog.naver.com']").each((_, el) => {
-        const href = $(el).attr("href");
-        const id = extractBlogId(href);
-        if (id) allIds.add(id);
-      });
-
-      // 혹시 스크립트/데이터에 박혀있는 blogId도 한번 더 긁기
-      const html = $.html();
-      const regex = /blogId[=:]"?([a-zA-Z0-9._-]+)"?/g;
-      let m;
-      while ((m = regex.exec(html)) !== null) {
-        if (m[1]) allIds.add(m[1]);
-      }
-
-      console.log(`   👥 Collected so far: ${allIds.size}`);
-
-      // 이 페이지에서 새로운 이웃이 하나도 안 늘어났으면 더 볼 필요 없음
-      if (allIds.size === lastSize) {
-        console.log(
-          `   ⛔ No new neighbors on page ${page}. Stop scanning pages.`
-        );
-        break;
-      }
-      lastSize = allIds.size;
-
-      // 혹시 페이지에 이웃 리스트가 거의 없으면(마지막 페이지 느낌) 멈춰도 됨
-      // (선택: 원하면 지워도 됨)
-      await sleep(500);
     } catch (e) {
-      console.warn(`   ⚠️ Failed to load page ${page}: ${e.message}`);
-      break; // 에러 나면 과감히 종료
+      console.warn(`   ⚠️ Failed to load buddy page: ${e.message}`);
+      continue;
     }
+
+    const $ = cheerio.load(res.data);
+
+    // 이 페이지에서 "실제 블로그" 링크만 추출
+    $("a[href*='blog.naver.com']").each((_, el) => {
+      const href = $(el).attr("href");
+      const id = extractPureBlogIdFromHref(href);
+      if (id) {
+        blogIds.add(id);
+      }
+    });
+
+    console.log(`   👥 Collected so far: ${blogIds.size}`);
+
+    // 페이지네이션 안의 다음 BuddyListManage 링크들 수집
+    $("a[href*='BuddyListManage.naver']").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      const abs = href.startsWith("http")
+        ? href
+        : new URL(href, url).toString();
+      if (!visited.has(abs)) {
+        toVisit.add(abs);
+      }
+    });
+
+    await sleep(300);
   }
 
-  console.log(`👥 Total unique neighbor blogs found: ${allIds.size}`);
-  return Array.from(allIds);
+  console.log(`👥 Total unique neighbor blogs found: ${blogIds.size}`);
+  return Array.from(blogIds);
 }
 
 /**
- * 활동정보 텍스트에서
- *  - 블로그 이웃 N명
- *  - 글 스크랩 N회
- * 를 추출
+ * 활동정보 텍스트에서 숫자 추출
  */
 function parseActivityInfoText(text) {
   const t = text.replace(/\s+/g, " ");
@@ -115,12 +160,11 @@ function parseActivityInfoText(text) {
 }
 
 /**
- * 문서 안에서 "활동정보" 블록 찾아서 텍스트 추출
+ * 문서에서 "활동정보" 블럭 찾기
  */
 function extractActivityInfo($) {
   let activityText = "";
 
-  // "활동정보"라는 문구가 있는 블럭 우선
   $("div, section, ul, li, span, p").each((_, el) => {
     const txt = $(el).text();
     if (txt.includes("활동정보")) {
@@ -128,7 +172,6 @@ function extractActivityInfo($) {
     }
   });
 
-  // 그래도 없으면 전체 텍스트에서 시도
   if (!activityText.trim()) {
     activityText = $("body").text();
   }
@@ -137,7 +180,7 @@ function extractActivityInfo($) {
 }
 
 /**
- * 인플루언서 여부: in.naver.com 링크나 뱃지/클래스로 추정
+ * 인플루언서 여부 추정
  */
 function detectInfluencer($, html) {
   if ($("a[href*='in.naver.com']").length > 0) return "Y";
@@ -147,7 +190,7 @@ function detectInfluencer($, html) {
 }
 
 /**
- * 2단계: 각 블로그 페이지에서 활동정보 긁기
+ * 각 블로그 활동정보 크롤링
  */
 async function fetchBlogInfo(blogId) {
   const blogUrl = `https://blog.naver.com/${blogId}`;
@@ -166,13 +209,12 @@ async function fetchBlogInfo(blogId) {
     let html = res.data;
     let $ = cheerio.load(html);
 
-    // 메인에서 활동정보 찾기
     let act = extractActivityInfo($);
     neighborCount = act.neighborCount || "";
     scrapCount = act.scrapCount || "";
     isInfluencer = detectInfluencer($, html);
 
-    // 일부 스킨: mainFrame 안에 활동정보가 있을 수 있음
+    // 일부 스킨(mainFrame 안)
     if ((!neighborCount || !scrapCount) && $("iframe#mainFrame").length > 0) {
       const iframeSrc = $("iframe#mainFrame").attr("src");
       if (iframeSrc) {
@@ -203,7 +245,7 @@ async function fetchBlogInfo(blogId) {
       blogId,
       blogUrl,
       neighborCount,
-      // 👉 이 값이 "다른 사람들이 그 사람 글을 스크랩해 간 총 횟수"
+      // 👉 다른 사람들이 그 사람 글을 스크랩한 횟수
       scrapScrapedByOthers: scrapCount,
       isInfluencer
     };
@@ -220,7 +262,7 @@ async function fetchBlogInfo(blogId) {
 }
 
 /**
- * 3단계: 전체 실행 & CSV 저장
+ * 전체 실행 & CSV 저장
  */
 async function main() {
   try {
