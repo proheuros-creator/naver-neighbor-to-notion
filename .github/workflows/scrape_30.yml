@@ -48,7 +48,7 @@ jobs:
       NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-      MAX_PAGE: 50  # 스크랩할 마지막 페이지 (150 → 1 순으로 수집)
+      MAX_PAGE: 10  # 스크랩할 마지막 페이지 (150 → 1 순으로 수집)
 
     steps:
       # 1️⃣ 코드 체크아웃
