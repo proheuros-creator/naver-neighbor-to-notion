@@ -3,22 +3,17 @@
  * ───────────────────────────────────────────────
  * 🧭 네이버 블로그 이웃새글 → Notion 자동 스크랩 메인 실행 파일
  *
- * ✅ 작동 방식 (CSV + 전체 이웃 버전)
+ * ✅ 동작 개요
  *  1. NAVER_NEIGHBOR_API_URL (예: BlogHome.naver?directoryNo=0&currentPage=1&groupId=0)
- *     를 템플릿으로 사용해, MAX_PAGE부터 1페이지까지 조회한다.
+ *     를 템플릿으로 사용해 MAX_PAGE → 1 페이지까지 조회.
  *     - page 또는 currentPage 파라미터만 변경
- *     - groupId 루프는 사용하지 않고, 템플릿 값(예: 0 = 전체)을 그대로 사용
+ *     - groupId 루프 없음 (0 = 전체 이웃 기준)
  *  2. neighbor-followings-result.csv 를 읽어
- *     blogId → { group, nickname } 매핑을 만든다.
- *  3. 각 글 파싱 시:
- *     - 응답에서 title, blogId, postId, URL, 날짜, 닉네임, 요약 추출
- *     - CSV 매핑으로 groupName 채워서 notion.js 의 upsertPost 에 전달
- *
- * ⚠️ 전제 조건
- *  - NAVER_NEIGHBOR_API_URL:
- *      "전체 이웃 새글"용 API 템플릿 (BlogHome/BuddyPostList 등 JSON 응답)
- *  - neighbor-followings-result.csv:
- *      최소 blogId, group 컬럼 보유 (컬럼명은 유연하게 매핑)
+ *     blogID → groupNames 매핑 생성.
+ *  3. 네이버 응답에서 각 글의 blogId를 기준으로:
+ *     - post.blogId = blogID
+ *     - post.groupName = groupNames (문자열)
+ *     을 붙여 notion.js/upsertPost 로 전달.
  */
 
 import "dotenv/config";
@@ -55,17 +50,16 @@ if (!API_TEMPLATE) {
 }
 
 // ───────────────────────────────────────────────
-// 📂 CSV → blogId 메타 매핑
+// 📂 CSV → blogID / groupNames 매핑
 // ───────────────────────────────────────────────
 
 /**
- * neighbor-followings-result.csv 로부터
- * blogId → { group, nickname } 매핑 생성
+ * neighbor-followings-result.csv
+ *   - blogID
+ *   - groupNames
  *
- * 허용 컬럼 예:
- *  - blogId: blogId / BLOGID / blogNo / blog_no / blog_id / "Blog ID" / id / ID
- *  - group : group / Group / groupName / GroupName / "이웃그룹" / group_name
- *  - nickname: nickname / Nickname / NICKNAME / nick / "닉네임"
+ * 형식 기준으로:
+ *  map[blogId] = { groupNames }
  */
 function loadBlogMetaMap() {
   if (!fs.existsSync(CSV_PATH)) {
@@ -86,9 +80,11 @@ function loadBlogMetaMap() {
     const map = {};
 
     for (const row of records) {
+      // blogID 컬럼 우선 사용
       const blogIdRaw =
+        row.blogID ||
         row.blogId ||
-        row.BLOGID ||
+        row.BlogID ||
         row.blog_no ||
         row.blogNo ||
         row.blog_id ||
@@ -101,15 +97,17 @@ function loadBlogMetaMap() {
       const blogId = String(blogIdRaw).trim();
       if (!blogId) continue;
 
-      const groupRaw =
+      // groupNames 컬럼 우선 사용
+      const groupNamesRaw =
+        row.groupNames ||
+        row.groupName ||
+        row.GroupNames ||
+        row.GroupName ||
         row.group ||
         row.Group ||
-        row.groupName ||
-        row.GroupName ||
-        row["이웃그룹"] ||
-        row.group_name ||
         "";
 
+      // 닉네임이 CSV에 있다면 옵션으로 같이 써도 됨 (지금은 필수 아님)
       const nicknameRaw =
         row.nickname ||
         row.Nickname ||
@@ -119,20 +117,19 @@ function loadBlogMetaMap() {
         "";
 
       map[blogId] = {
-        group: groupRaw ? String(groupRaw).trim() : "",
+        groupNames: groupNamesRaw
+          ? String(groupNamesRaw).trim()
+          : "",
         nickname: nicknameRaw ? String(nicknameRaw).trim() : "",
       };
     }
 
     console.log(
-      `✅ neighbor-followings-result.csv 로드 완료: ${Object.keys(map).length}개 blogId`
+      `✅ CSV 로드 완료: ${Object.keys(map).length}개 blogID → groupNames 매핑`
     );
     return map;
   } catch (err) {
-    console.error(
-      "❌ neighbor-followings-result.csv 파싱 실패:",
-      err.message
-    );
+    console.error("❌ CSV 파싱 실패:", err.message);
     return {};
   }
 }
@@ -155,10 +152,9 @@ function buildPageUrl(page) {
       u.searchParams.append("page", String(page));
     }
 
-    // groupId 는 템플릿 값 유지 (예: 0 = 전체)
+    // groupId는 템플릿 값 유지 (예: 0 = 전체)
     return u.toString();
   } catch {
-    // 문자열 치환 fallback
     let url = API_TEMPLATE;
     if (url.includes("page=")) {
       url = url.replace(/(page=)\d+/, `$1${page}`);
@@ -230,105 +226,10 @@ async function fetchPagePosts(page) {
     result.items ||
     [];
 
+  let missingMetaCount = 0;
+
   let posts = list
     .map((item) => {
       const title = item.title || item.postTitle || "";
       const blogIdRaw =
-        item.blogId || item.blogNo || item.bloggerId || "";
-      const blogId = blogIdRaw ? String(blogIdRaw).trim() : "";
-
-      const logNo =
-        item.logNo || item.postId || item.articleId || null;
-
-      const link =
-        item.url ||
-        item.postUrl ||
-        item.blogPostUrl ||
-        (blogId && logNo
-          ? `https://blog.naver.com/${blogId}/${logNo}`
-          : "");
-
-      const meta = blogId ? BLOG_META_MAP[blogId] || {} : {};
-
-      const nickname =
-        item.nickName ||
-        item.bloggerName ||
-        item.userName ||
-        meta.nickname ||
-        "";
-
-      const pubdate =
-        item.addDate ||
-        item.postDate ||
-        item.writeDate ||
-        item.regDate ||
-        item.createdAt ||
-        null;
-
-      const description =
-        item.briefContents ||
-        item.summary ||
-        item.contentsPreview ||
-        item.previewText ||
-        "";
-
-      const groupName = meta.group || ""; // CSV 기반 그룹명
-
-      const postId = logNo || null;
-
-      if (!title || !link || !postId) return null;
-
-      return {
-        title,
-        link,
-        nickname,
-        pubdate,
-        description,
-        blogId,
-        postId,
-        groupName,
-      };
-    })
-    .filter(Boolean);
-
-  // 페이지 내 정렬: 오래된 글 → 최신 글
-  posts = posts.reverse();
-
-  return { posts };
-}
-
-// ───────────────────────────────────────────────
-// 🚀 메인 실행
-// ───────────────────────────────────────────────
-
-async function main() {
-  console.log(
-    "🚀 전체 이웃 새글 → Notion 스크랩 시작 (CSV 기반 그룹 매핑)"
-  );
-
-  let total = 0;
-
-  for (let page = MAX_PAGE; page >= 1; page--) {
-    const { posts } = await fetchPagePosts(page);
-    console.log(`📥 ${page}페이지 글 수: ${posts.length}`);
-    total += posts.length;
-
-    for (const post of posts) {
-      try {
-        await upsertPost(post);
-      } catch (err) {
-        console.error("❌ Notion 저장 오류:", err.message);
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  console.log(`🎉 스크랩 완료 (총 ${total}건 처리 시도)`);
-}
-
-main().catch((err) => {
-  console.error("❌ 스크립트 전체 오류:", err);
-  process.exit(1);
-});
+        item
