@@ -4,14 +4,14 @@
  * 🧩 네이버 이웃새글 → Notion DB 업서트 모듈
  *
  * 규칙:
- *  - UniqueID = blogId_postId (blogId 없으면 postId 단독)
+ *  - UniqueID = {blogId}_{postId} (둘 다 URL/전처리에서 온 값)
  *  - BlogID (Rich text)에 blogId 저장
  *  - Group (multi-select)에 groupNames 저장
  *      - "A"           → [A]
  *      - "A,B,C"       → [A, B, C]
- *  - CSV에 groupNames 있으면 → 그 값으로 Group "덮어쓰기"
+ *  - CSV에 groupNames 있으면 → 그 값으로 Group 덮어쓰기
  *  - CSV에 groupNames 없으면 → 기존 Group 유지
- *  - (Title, URL, Category, Group 모두 동일하면 update 스킵)
+ *  - Title / URL / Category / Group 변동 없으면 update 스킵
  */
 
 import { Client } from "@notionhq/client";
@@ -37,17 +37,14 @@ function normalizeNaverDate(raw) {
 
   const s = String(raw).trim();
 
-  // 13자리 timestamp (ms)
   if (/^\d{13}$/.test(s)) {
     return new Date(Number(s)).toISOString();
   }
 
-  // 10자리 timestamp (sec)
   if (/^\d{10}$/.test(s)) {
     return new Date(Number(s) * 1000).toISOString();
   }
 
-  // "YYYY.MM.DD", "YYYY/MM/DD", "YYYY년 MM월 DD일" 등
   const replaced = s
     .replace(/\./g, "-")
     .replace(/\//g, "-")
@@ -61,14 +58,10 @@ function normalizeNaverDate(raw) {
 }
 
 function extractYearMonthQuarter(isoString) {
-  if (!isoString) {
-    return { year: "", yearMonth: "", quarter: "" };
-  }
+  if (!isoString) return { year: "", yearMonth: "", quarter: "" };
 
   const d = new Date(isoString);
-  if (isNaN(d.getTime())) {
-    return { year: "", yearMonth: "", quarter: "" };
-  }
+  if (isNaN(d.getTime())) return { year: "", yearMonth: "", quarter: "" };
 
   const year = String(d.getFullYear());
   const month = d.getMonth() + 1;
@@ -162,9 +155,9 @@ function resolveTargetGroupNames(fromCsv, existingNames) {
  *    nickname,
  *    pubdate,
  *    description,
- *    blogId,
- *    postId,
- *    groupName, // CSV groupNames 문자열 ("A" 또는 "A,B,C")
+ *    blogId,    // URL에서 확정된 값
+ *    postId,    // URL에서 확정된 값
+ *    groupName, // CSV groupNames 문자열
  *  }
  */
 export async function upsertPost(post) {
@@ -172,16 +165,17 @@ export async function upsertPost(post) {
   const postId = post.postId ? String(post.postId) : "";
   const groupNamesFromCsv = post.groupName || "";
 
-  // UniqueID 생성
   const uniqueId =
-    blogId && postId ? `${blogId}_${postId}` : postId || null;
+    blogId && postId ? `${blogId}_${postId}` : null;
 
   if (!uniqueId) {
-    console.warn("⚠️ UniqueID 없음, 스킵:", post.title);
+    console.warn(
+      "⚠️ UniqueID 없음 (blogId/postId 부족), 스킵:",
+      post.title
+    );
     return;
   }
 
-  // 기존 페이지 조회
   const existing = await findExistingPageWithRetry(uniqueId);
   if (existing === undefined) {
     console.warn(
@@ -194,7 +188,6 @@ export async function upsertPost(post) {
   const { year, yearMonth, quarter } =
     extractYearMonthQuarter(originalDate);
 
-  // 공통 속성(신규/업데이트 공용)
   const baseProperties = {
     Title: {
       title: [
@@ -282,7 +275,7 @@ export async function upsertPost(post) {
     }),
   };
 
-  // 1️⃣ 신규 페이지 (existing 없음)
+  // 신규 페이지
   if (!existing) {
     const csvNames = parseGroupNames(groupNamesFromCsv);
     const groupMulti = buildGroupMultiSelect(csvNames);
@@ -303,7 +296,7 @@ export async function upsertPost(post) {
     return;
   }
 
-  // 2️⃣ 기존 페이지 업데이트
+  // 기존 페이지 업데이트
   const old = existing.properties;
 
   const oldTitle =
@@ -343,7 +336,6 @@ export async function upsertPost(post) {
       multi_select: groupMulti,
     };
   } else {
-    // CSV에도 없고 기존에도 없으면 빈 배열
     updateProperties.Group = { multi_select: [] };
   }
 
