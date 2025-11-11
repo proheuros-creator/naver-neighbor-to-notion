@@ -6,7 +6,7 @@
  * ✅ 주요 기능:
  *  - UniqueID(blogId_postId)로 중복 등록 방지
  *  - pubdate 로부터 연도/연월/분기 추출 → 텍스트 컬럼에 저장
- *  - blogId 를 ID(Text) 컬럼에 저장
+ *  - blogId 를 BlogID(Text) 컬럼에 저장
  *  - Group(Text) 컬럼에 이웃그룹 이름 저장 (index.js에서 전달)
  *  - 기존 글이면 update, 없으면 create
  *  - 기존 내용이 동일하면 update 생략 (⏩ 변경 없음)
@@ -20,7 +20,7 @@
  *  - URL        : URL (URL 타입)
  *  - Nickname   : Text 또는 Rich text
  *  - UniqueID   : Rich text
- *  - ID         : Rich text (blogId 저장)
+ *  - BlogID         : Rich text (blogId 저장)
  *  - 연도       : Rich text
  *  - 연월       : Rich text
  *  - 분기       : Rich text
@@ -257,7 +257,7 @@ export async function upsertPost(post) {
 
     // blogId → ID 컬럼
     ...(blogId && {
-      ID: {
+      BlogID: {
         rich_text: [
           {
             text: { content: blogId },
