@@ -12,11 +12,11 @@
  */
 
 export const GROUPS = [
-  { id: 4, name: "증권사" },  
-  { id: 8, name: "투자(Youtube)" }, 
+  { id: 4, name: "10.증권사" },  
+  { id: 8, name: "09.Youtuber" }, 
   //{ id: 5, name: "중국투자" },  
-  { id: 3, name: "미국투자" }, 
-  { id: 9, name: "에코" },
+  { id: 3, name: "08.해외투자" }, 
+  //{ id: 9, name: "에코" },
   { id: 16, name: "07.Macro" },
   { id: 15, name: "06.Feed" },
   { id: 2, name: "05.투자" },
