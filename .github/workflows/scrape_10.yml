@@ -17,7 +17,7 @@
 #   3. notion.js, index.js 파일이 루트 디렉토리에 있어야 함
 # ───────────────────────────────────────────────
 
-name: Naver BlogHome to Notion (30pages)  # 워크플로우 이름
+name: Naver BlogHome to Notion (manual)  # 워크플로우 이름
 
 on:
   //# ⏰ (1) 스케줄 기반 실행
