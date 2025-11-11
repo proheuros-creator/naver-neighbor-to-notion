@@ -7,7 +7,7 @@
  *  - UniqueID = blogId_postId (또는 postId)
  *  - BlogID(Text) 컬럼에 blogId 저장
  *  - Group(Multi-select) 컬럼에 groupNames 저장
- *      - CSV groupNames: "A,B,C" → ["A","B","C"] 옵션으로 설정
+ *      - CSV groupNames: "A,B,C" → ["A","B","C"]
  *  - CSV에 groupNames 있으면 → 그 값으로 Group 덮어쓰기
  *  - CSV에 groupNames 없으면 → 기존 Group 유지
  *  - Title / URL / Category / Group 모두 동일하면 update 스킵
@@ -114,4 +114,201 @@ function parseGroupNames(groupNamesStr) {
 }
 
 function buildGroupMultiSelectFromNames(names) {
-  if (!names
+  if (!names || names.length === 0) return null;
+  return names.map((name) => ({ name }));
+}
+
+function getGroupNamesFromPage(page) {
+  const multi = page?.properties?.Group?.multi_select || [];
+  return multi.map((o) => o.name).filter(Boolean).sort();
+}
+
+// CSV groupNames가 없으면 기존 값 유지
+function getTargetGroupNames(groupNamesFromCsv, oldNames) {
+  const csvNames = parseGroupNames(groupNamesFromCsv);
+  if (csvNames.length === 0) return oldNames.slice().sort();
+  return csvNames;
+}
+
+// ───────────────────────────────────────────────
+// upsertPost
+// ───────────────────────────────────────────────
+
+export async function upsertPost(post) {
+  const blogId = post.blogId ? String(post.blogId) : "";
+  const postId = post.postId ? String(post.postId) : "";
+  const groupNamesFromCsv = post.groupName || "";
+
+  const uniqueId = blogId && postId ? `${blogId}_${postId}` : postId || null;
+  if (!uniqueId) {
+    console.warn("⚠️ UniqueID 없음, 스킵:", post.title);
+    return;
+  }
+
+  const existing = await findExistingPageWithRetry(uniqueId);
+  if (existing === undefined) {
+    console.warn(
+      `⚠️ [${uniqueId}] 조회 최종 실패 → 새 페이지 생성 시도 (중복 가능성 있음)`
+    );
+  }
+
+  const originalDate = normalizeNaverDate(post.pubdate);
+  const createdAt = new Date().toISOString();
+  const { year, yearMonth, quarter } = extractYearMonthQuarter(originalDate);
+
+  const baseProperties = {
+    Title: {
+      title: [
+        {
+          text: { content: post.title || "(제목 없음)" },
+        },
+      ],
+    },
+    URL: {
+      url: post.link || null,
+    },
+    Nickname: {
+      rich_text: [
+        {
+          text: { content: post.nickname || "" },
+        },
+      ],
+    },
+    ...(originalDate && {
+      "원본 날짜": {
+        date: { start: originalDate },
+      },
+    }),
+    "생성 일시": {
+      date: { start: createdAt },
+    },
+    Category: {
+      rich_text: [
+        {
+          text: { content: post.category || "" },
+        },
+      ],
+    },
+    Description: {
+      rich_text: [
+        {
+          text: {
+            content: (post.description || "").slice(0, 1800),
+          },
+        },
+      ],
+    },
+    UniqueID: {
+      rich_text: [
+        {
+          text: { content: uniqueId },
+        },
+      ],
+    },
+    ...(blogId && {
+      BlogID: {
+        rich_text: [
+          {
+            text: { content: blogId },
+          },
+        ],
+      },
+    }),
+    ...(year && {
+      연도: {
+        rich_text: [
+          {
+            text: { content: year },
+          },
+        ],
+      },
+    }),
+    ...(yearMonth && {
+      연월: {
+        rich_text: [
+          {
+            text: { content: yearMonth },
+          },
+        ],
+      },
+    }),
+    ...(quarter && {
+      분기: {
+        rich_text: [
+          {
+            text: { content: quarter },
+          },
+        ],
+      },
+    }),
+  };
+
+  // 신규 생성
+  if (!existing) {
+    const csvNames = parseGroupNames(groupNamesFromCsv);
+    const groupMulti = buildGroupMultiSelectFromNames(csvNames);
+
+    const properties = {
+      ...baseProperties,
+      ...(groupMulti && {
+        Group: { multi_select: groupMulti },
+      }),
+    };
+
+    await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties,
+    });
+    console.log(`🆕 새 글 추가: ${post.title}`);
+    return;
+  }
+
+  // 기존 페이지 업데이트
+  const old = existing.properties;
+
+  const oldTitle =
+    old.Title?.title?.[0]?.plain_text || "";
+  const oldUrl = old.URL?.url || "";
+  const oldCat =
+    old.Category?.rich_text?.[0]?.plain_text || "";
+  const oldGroupNames = getGroupNamesFromPage(existing);
+
+  const targetGroupNames = getTargetGroupNames(
+    groupNamesFromCsv,
+    oldGroupNames
+  );
+
+  const nextTitle = post.title || "(제목 없음)";
+  const nextUrl = post.link || null;
+  const nextCat = post.category || "";
+
+  const isSame =
+    oldTitle === nextTitle &&
+    oldUrl === nextUrl &&
+    oldCat === nextCat &&
+    oldGroupNames.join(",") === targetGroupNames.join(",");
+
+  if (isSame) {
+    console.log(`⏩ 변경 없음 (스킵): ${post.title}`);
+    return;
+  }
+
+  const updateProperties = {
+    ...baseProperties,
+  };
+
+  const groupMulti = buildGroupMultiSelectFromNames(targetGroupNames);
+  if (groupMulti) {
+    updateProperties.Group = {
+      multi_select: groupMulti,
+    };
+  } else {
+    updateProperties.Group = { multi_select: [] };
+  }
+
+  await notion.pages.update({
+    page_id: existing.id,
+    properties: updateProperties,
+  });
+  console.log(`🔄 업데이트: ${post.title}`);
+}
