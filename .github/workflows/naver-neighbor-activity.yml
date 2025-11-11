@@ -22,7 +22,7 @@ jobs:
       - name: Run script
         working-directory: ./neighbor-activity
         env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 여기 이름을 네 repo에 이미 있는 secret 이름으로 맞추기
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 기존에 쓰던 이름
         run: npm start
 
       - name: Upload CSV
