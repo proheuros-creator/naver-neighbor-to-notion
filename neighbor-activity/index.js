@@ -76,11 +76,25 @@ function parseActivityInfoText(text) {
   let neighborCount = "";
   let scrapCount = "";
 
-  const n = t.match(/블로그\s*이웃\s*([\d,]+)\s*명/);
-  if (n) neighborCount = n[1].replace(/,/g, "");
+  // 1차: "블로그 이웃 123명"
+  let m = t.match(/블로그\s*이웃\s*([\d,]+)\s*명/);
+  if (m) neighborCount = m[1].replace(/,/g, "");
 
-  const s = t.match(/글\s*스크랩\s*([\d,]+)\s*회/);
-  if (s) scrapCount = s[1].replace(/,/g, "");
+  // 2차: "이웃 123명"
+  if (!neighborCount) {
+    m = t.match(/[^가-힣A-Za-z]이웃\s*([\d,]+)\s*명/);
+    if (m) neighborCount = m[1].replace(/,/g, "");
+  }
+
+  // 글 스크랩: "글 스크랩 45회" 우선
+  m = t.match(/글\s*스크랩\s*([\d,]+)\s*회/);
+  if (m) scrapCount = m[1].replace(/,/g, "");
+
+  // 혹시 "스크랩 45회"만 있는 경우
+  if (!scrapCount) {
+    m = t.match(/스크랩\s*([\d,]+)\s*회/);
+    if (m) scrapCount = m[1].replace(/,/g, "");
+  }
 
   return { neighborCount, scrapCount };
 }
@@ -89,21 +103,66 @@ function parseActivityInfoText(text) {
 function extractActivityInfo($) {
   let txt = "";
 
-  $("div, section, ul, li, span, p").each((_, el) => {
+  // 활동정보 영역 위주로 긁기
+  $(
+    "div, section, ul, li, span, p"
+  ).each((_, el) => {
     const t = $(el).text();
-    if (t.includes("활동정보")) txt += " " + t;
+    if (
+      t.includes("활동정보") ||
+      t.includes("블로그 이웃") ||
+      t.includes("글 스크랩")
+    ) {
+      txt += " " + t;
+    }
   });
 
-  if (!txt.trim()) txt = $("body").text();
+  // 그래도 없으면 전체 텍스트에서 시도 (fallback)
+  if (!txt.trim()) {
+    txt = $("body").text();
+  }
 
   return parseActivityInfoText(txt);
 }
 
 // 인플루언서 여부 추정
-function detectInfluencer($, html) {
+// 인플루언서 여부 추정 (블로그 HTML + in.naver.com 프로필 둘 다 검사)
+async function detectInfluencer(blogId, $, html) {
+  // 1차: 블로그 페이지 안에서 바로 확인
   if ($("a[href*='in.naver.com']").length > 0) return "Y";
-  if (html.includes("in.naver.com") && html.includes("인플루언서")) return "Y";
+  if (
+    html.includes("in.naver.com") &&
+    (html.includes("인플루언서") || html.toLowerCase().includes("influencer"))
+  ) {
+    return "Y";
+  }
   if ($("[class*='influencer'], [src*='influencer']").length > 0) return "Y";
+
+  // 2차: in.naver.com/{blogId} 직접 조회
+  const inUrl = `https://in.naver.com/${blogId}`;
+  try {
+    const res = await axios.get(inUrl, {
+      maxRedirects: 0,
+      validateStatus: (s) => s === 200 || (s >= 300 && s < 400),
+      headers: { "User-Agent": UA }
+    });
+
+    // 3xx 리다이렉트 되어도 인플루언서 프로필이면 HTML/헤더에 흔적이 남아있을 수 있음
+    const body = typeof res.data === "string" ? res.data : "";
+    const text = (body || "").toString();
+
+    if (
+      res.status === 200 &&
+      (text.includes("인플루언서") ||
+        text.toLowerCase().includes("influencer") ||
+        text.includes("in.naver.com"))
+    ) {
+      return "Y";
+    }
+  } catch (e) {
+    // 404/에러면 인플루언서 아님으로 간주
+  }
+
   return "N";
 }
 
@@ -121,10 +180,13 @@ async function fetchBlogInfo(blogId) {
     const html = res.data;
     let $ = cheerio.load(html);
 
+    // 활동정보 추출 (여긴 네가 이미 교체해둔 parse/extract 버전 사용)
     let { neighborCount, scrapCount } = extractActivityInfo($);
-    let isInfluencer = detectInfluencer($, html);
 
-    // 일부 스킨(mainFrame) 대응
+    // 인플루언서 판별 (블로그 + in.naver.com/{blogId})
+    let isInfluencer = await detectInfluencer(blogId, $, html);
+
+    // mainFrame 안에 활동정보가 있는 스킨 대응
     if ((!neighborCount || !scrapCount) && $("iframe#mainFrame").length > 0) {
       const src = $("iframe#mainFrame").attr("src");
       if (src) {
@@ -142,9 +204,7 @@ async function fetchBlogInfo(blogId) {
           if (!scrapCount && act2.scrapCount)
             scrapCount = act2.scrapCount;
         } catch (e) {
-          console.warn(
-            `   ⚠️ iframe scan failed for ${blogId}: ${e.message}`
-          );
+          console.warn(`   ⚠️ iframe scan failed for ${blogId}: ${e.message}`);
         }
       }
     }
