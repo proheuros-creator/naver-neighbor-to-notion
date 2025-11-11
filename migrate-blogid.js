@@ -75,20 +75,26 @@ const BLOGID_GROUP_MAP = new Map();
 
     let mapped = 0;
     for (const row of records) {
+      // ✅ blogID 컬럼 대응 (대소문자/변형 포함)
       const blogId = String(
+        row.blogID ||        // 실제 CSV: blogID
         row.blogId ||
-          row.blogid ||
-          row.BLOGID ||
-          row.BlogID ||
-          row.blog_id ||
-          ''
+        row.blogid ||
+        row.BlogID ||
+        row.BLOGID ||
+        row.blog_id ||
+        ''
       ).trim();
+
+      // ✅ groupNames 컬럼 → Notion Group 에 그대로 사용
       const group = String(
+        row.groupNames ||    // 실제 CSV: groupNames
+        row.GroupNames ||
+        row.groupName ||
+        row.GroupName ||
         row.group ||
-          row.Group ||
-          row.groupName ||
-          row.GroupName ||
-          ''
+        row.Group ||
+        ''
       ).trim();
 
       if (!blogId || !group) continue;
