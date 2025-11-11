@@ -1,7 +1,13 @@
 // neighbor-activity/config.js
+
 module.exports = {
-  baseId: "proheuros",     // 네 blogId
+  // 네 블로그 ID
+  baseId: "proheuros",
+
+  // 내가 추가한 이웃 페이지 번호 범위 (스크린샷 기준 1~10)
   startPage: 1,
-  endPage: 10,              // 네 화면에 보이는 마지막 페이지 번호
+  endPage: 10,
+
+  // 블로그 하나 크롤링 후 대기(ms)
   delayMs: 1500
 };
