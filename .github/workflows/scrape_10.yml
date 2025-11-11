@@ -20,11 +20,6 @@
 name: Naver BlogHome to Notion (day)  # 워크플로우 이름
 
 on:
-  //# ⏰ (1) 스케줄 기반 실행
-  //schedule:
-  //  # 매일 UTC 18:00 (한국시간 새벽 3시)
-  //  - cron: '0 18 * * *'
-
   # 🖐 (2) 수동 실행 (GitHub Actions > Run workflow 버튼)
   workflow_dispatch: {}
 
