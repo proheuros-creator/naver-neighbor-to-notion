@@ -12,8 +12,8 @@
  */
 
 export const GROUPS = [
-  { id: 1, name: "01.daily" },
-  { id: 7, name: "02.insight" },
+  { id: 1, name: "01.Daily" },
+  { id: 7, name: "02.Insight" },
   { id: 14, name: "03.정리" },  
   { id: 13, name: "04.Diligent" },
   { id: 2, name: "05.투자" },
