@@ -1,4 +1,4 @@
-name: Naver Neighbor Activity Scan
+name: Naver Neighbor Followings Scan
 
 on:
   workflow_dispatch:
@@ -6,28 +6,25 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install dependencies
+      - name: Install deps
         working-directory: ./neighbor-activity
         run: npm install
 
-      - name: Run neighbor activity scan
+      - name: Run script
         working-directory: ./neighbor-activity
         env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }} # 이미 쓰고 있는 시크릿 이름과 맞추기
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
         run: npm start
 
-      - name: Upload result CSV
+      - name: Upload CSV
         uses: actions/upload-artifact@v4
         with:
-          name: neighbor-activity-result
-          path: neighbor-activity/neighbor-activity-result.csv
+          name: neighbor-followings-result
+          path: neighbor-activity/neighbor-followings-result.csv
