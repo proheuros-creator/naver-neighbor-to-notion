@@ -1,0 +1,34 @@
+name: 🔧 Fix Notion BlogID & UniqueID from URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      RUN_LIMIT:
+        description: "최대 수정 페이지 수 (0이면 제한 없음)"
+        required: false
+        default: "0"
+
+jobs:
+  fix-notion-ids:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🧩 Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: ⚙️ Run Notion ID fixer
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          RUN_LIMIT: ${{ github.event.inputs.RUN_LIMIT }}
+        run: |
+          echo "🚀 Running fix-ids-from-url.js..."
+          node fix-ids-from-url.js
