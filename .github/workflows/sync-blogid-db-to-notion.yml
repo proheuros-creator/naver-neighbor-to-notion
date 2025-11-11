@@ -1,7 +1,7 @@
 name: Sync BlogID DB from CSV
 
 on:
-  workflow_dispatch: # 수동 실행 (Actions 탭에서 Run workflow 버튼으로 실행)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,23 +10,19 @@ jobs:
   sync-blogid:
     runs-on: ubuntu-latest
     steps:
-      # 1️⃣ 저장소 체크아웃 (repo 안의 CSV 파일 가져오기)
       - uses: actions/checkout@v4
 
-      # 2️⃣ Node.js 환경 세팅
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # 3️⃣ 의존성 설치 (Notion SDK 등)
       - name: Install dependencies
         working-directory: ./BlogID
         run: npm install
 
-      # 4️⃣ CSV → Notion DB 반영 스크립트 실행
       - name: Sync BlogID DB from CSV
         working-directory: ./BlogID
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_BLOGID_DB: ${{ secrets.NOTION_BLOGID_DB }}
-        run: node sync-blogid-from-csv.js ../neighbor-followings-result.csv
+        run: node sync-blogid-from-csv.js $GITHUB_WORKSPACE/neighbor-followings-result.csv
