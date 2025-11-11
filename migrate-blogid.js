@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
-// ESM용 __dirname
+// ESM 환경용 __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -30,16 +30,16 @@ const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
 // ✅ Notion 속성 이름들
 const FORMULA_PROP_NAME = 'BlogID_f'; // formula
-const TEXT_PROP_NAME = 'BlogID';      // text
+const TEXT_PROP_NAME = 'BlogID';      // text (최종 blogId 저장)
 const YEAR_PROP_NAME = '연도';
 const YEARMONTH_PROP_NAME = '연월';
 const QUARTER_PROP_NAME = '분기';
 const DATE_PROP_NAME = '원본 날짜';
-const GROUP_PROP_NAME = 'Group';      // CSV 기반 그룹 태그
+const GROUP_PROP_NAME = 'Group';      // multi_select (CSV 기반 그룹 태그)
 
 // ───────────────────────────────────────────────
 // 📥 neighbor-followings-result.csv → BlogID-Group 매핑
-//    실제 위치: migrate-blogid.js와 같은 폴더
+//    실제 위치: migrate-blogid.js와 같은 폴더 (또는 FOLLOWINGS_CSV_PATH)
 // ───────────────────────────────────────────────
 const explicitCsvPath = process.env.FOLLOWINGS_CSV_PATH
   ? path.resolve(process.env.FOLLOWINGS_CSV_PATH)
@@ -74,32 +74,36 @@ const BLOGID_GROUP_MAP = new Map();
     });
 
     let mapped = 0;
+
     for (const row of records) {
-      // ✅ blogID 컬럼 대응 (대소문자/변형 포함)
       const blogId = String(
-        row.blogID ||        // 실제 CSV: blogID
-        row.blogId ||
-        row.blogid ||
-        row.BlogID ||
-        row.BLOGID ||
-        row.blog_id ||
-        ''
+        row.blogID ||
+          row.blogId ||
+          row.blogid ||
+          row.BlogID ||
+          row.BLOGID ||
+          row.blog_id ||
+          ''
       ).trim();
 
-      // ✅ groupNames 컬럼 → Notion Group 에 그대로 사용
-      const group = String(
-        row.groupNames ||    // 실제 CSV: groupNames
+      const rawGroup =
+        row.groupNames ||
         row.GroupNames ||
         row.groupName ||
         row.GroupName ||
         row.group ||
         row.Group ||
-        ''
-      ).trim();
+        '';
 
-      if (!blogId || !group) continue;
+      // "A,B,C" 형태도 지원
+      const groups = String(rawGroup || '')
+        .split(',')
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0);
 
-      BLOGID_GROUP_MAP.set(blogId, group);
+      if (!blogId || groups.length === 0) continue;
+
+      BLOGID_GROUP_MAP.set(blogId, groups);
       mapped++;
     }
 
@@ -112,8 +116,10 @@ const BLOGID_GROUP_MAP = new Map();
 })();
 
 // ───────────────────────────────────────────────
-// 유틸: Formula 값 추출
+// 유틸 함수들
 // ───────────────────────────────────────────────
+
+// formula → string
 function extractFormulaValue(formulaProp) {
   if (!formulaProp || formulaProp.type !== 'formula') return null;
   const f = formulaProp.formula;
@@ -126,15 +132,30 @@ function extractFormulaValue(formulaProp) {
   return null;
 }
 
-// 유틸: rich_text → plain text
+// rich_text → plain text
 function getPlainTextFromRichText(prop) {
   if (!prop || prop.type !== 'rich_text' || !prop.rich_text) return '';
   return prop.rich_text.map((r) => r.plain_text || '').join('').trim();
 }
 
-// ───────────────────────────────────────────────
-// 📅 원본 날짜 → 연/연월/분기 계산
-// ───────────────────────────────────────────────
+// multi_select → name 배열
+function getMultiSelectNames(prop) {
+  if (!prop || prop.type !== 'multi_select' || !prop.multi_select) return [];
+  return prop.multi_select
+    .map((o) => (o && o.name ? o.name.trim() : ''))
+    .filter((v) => v.length > 0);
+}
+
+// 배열 비교 (순서 무시)
+function arraysEqualIgnoreOrder(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
+// 날짜 → 연/연월/분기
 function extractYyYmQ(dateProp) {
   if (!dateProp || dateProp.type !== 'date' || !dateProp.date?.start) {
     return { year: null, yearMonth: null, quarter: null };
@@ -156,9 +177,7 @@ function extractYyYmQ(dateProp) {
   return { year, yearMonth, quarter };
 }
 
-// ───────────────────────────────────────────────
-// 🔁 databases.query 재시도
-// ───────────────────────────────────────────────
+// databases.query 재시도
 async function queryWithRetry(params, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -192,9 +211,7 @@ async function queryWithRetry(params, retries = 3) {
   }
 }
 
-// ───────────────────────────────────────────────
-// 🔁 페이지 업데이트 재시도
-// ───────────────────────────────────────────────
+// pages.update 재시도
 async function safeUpdatePage(pageId, properties, retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -235,7 +252,7 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
 }
 
 // ───────────────────────────────────────────────
-// 🚀 메인 마이그레이션 루프
+// 🚀 메인 마이그레이션
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
@@ -322,38 +339,44 @@ async function migrate() {
         }
       }
 
-      // 3) Group 동기화
-      // - CSV에 해당 blogId가 있을 때만
-      // - 현재 Group 값과 다를 때만 업데이트
+      // 3) Group 동기화 (multi_select)
       if (
         effectiveBlogId &&
         BLOGID_GROUP_MAP.size > 0 &&
         props[GROUP_PROP_NAME]
       ) {
-        const expectedGroup = BLOGID_GROUP_MAP.get(effectiveBlogId);
-        if (expectedGroup) {
-          const currentGroup = getPlainTextFromRichText(
-            props[GROUP_PROP_NAME]
-          );
-          if (currentGroup !== expectedGroup) {
-            updates[GROUP_PROP_NAME] = {
-              rich_text: [{ text: { content: expectedGroup } }],
-            };
-            updatedGroup++;
+        const expectedGroups = BLOGID_GROUP_MAP.get(effectiveBlogId); // ['A', 'B', ...]
+        if (expectedGroups && expectedGroups.length > 0) {
+          if (props[GROUP_PROP_NAME].type === 'multi_select') {
+            const currentGroups = getMultiSelectNames(props[GROUP_PROP_NAME]);
+
+            // 다를 때만 업데이트 → 여러 번 실행해도 이미 맞으면 스킵
+            if (!arraysEqualIgnoreOrder(currentGroups, expectedGroups)) {
+              updates[GROUP_PROP_NAME] = {
+                multi_select: expectedGroups.map((name) => ({ name })),
+              };
+              updatedGroup++;
+            }
+          } else {
+            // 타입이 multi_select가 아니면 건너뜀 (스키마 불일치)
+            // 필요하면 여기서 console.warn 찍어도 됨
           }
         }
       }
 
+      // 실제로 바꿀 값이 있을 때만 업데이트
       if (Object.keys(updates).length > 0) {
         try {
           await safeUpdatePage(page.id, updates);
           updatedPages++;
         } catch {
-          // 로그는 safeUpdatePage에서 처리, 계속 진행
+          // safeUpdatePage에서 로그 처리함 → 계속 진행
         }
 
+        // rate limit 완화
         await new Promise((r) => setTimeout(r, 80));
 
+        // MIGRATE_LIMIT 도달 체크
         if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
           console.log(
             `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
