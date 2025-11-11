@@ -1,40 +1,13 @@
-// BlogID/sync-blogid-from-csv.js
-const fs = require("fs");
-const path = require("path");
-const { Client } = require("@notionhq/client");
-const { parse } = require("csv-parse/sync");
-
-// CSV 경로 처리
-const csvPath = process.argv[2]
-  ? path.resolve(process.argv[2])
-  : path.resolve(__dirname, "../neighbor-followings-result.csv");
-
-if (!fs.existsSync(csvPath)) {
-  console.error(`❌ CSV not found at ${csvPath}`);
-  process.exit(1);
-}
-
-console.log(`✅ CSV found at ${csvPath}`);
-
-// ✅ 환경 변수
-const notionToken = process.env.NOTION_API_KEY;
-const databaseId = process.env.NOTION_DATABASE_ID_BLOGID;
-
-if (!notionToken) {
-  console.error("❌ NOTION_API_KEY is not set");
-  process.exit(1);
-}
-if (!databaseId) {
-  console.error("❌ NOTION_DATABASE_ID_BLOGID is not set");
-  process.exit(1);
-}
-
-const notion = new Client({ auth: notionToken });
-
 // 🔁 blogId 기준으로 페이지 생성/갱신
 async function upsertBlogIdRow(row) {
   const blogId = (row.blogId || "").trim();
   if (!blogId) return;
+
+  // 🚫 특정 blogId 제외
+  if (blogId === "GoRepresentBlog") {
+    console.log(`⏭️ Skip: ${blogId}`);
+    return;
+  }
 
   const blogUrl = (row.blogUrl || "").trim();
   const nickname = (row.nickname || "").trim();
@@ -96,26 +69,3 @@ async function upsertBlogIdRow(row) {
     });
   }
 }
-
-// 🔰 실행
-async function main() {
-  const csvText = fs.readFileSync(csvPath, "utf8");
-  const records = parse(csvText, { columns: true, skip_empty_lines: true });
-
-  console.log(`📄 ${records.length} rows loaded from CSV`);
-
-  for (const row of records) {
-    try {
-      await upsertBlogIdRow(row);
-    } catch (e) {
-      console.error(`⚠️ Failed to sync ${row.blogId}: ${e.message}`);
-    }
-  }
-
-  console.log("✅ BlogID DB sync complete");
-}
-
-main().catch((e) => {
-  console.error("❌ Fatal:", e.message);
-  process.exit(1);
-});
