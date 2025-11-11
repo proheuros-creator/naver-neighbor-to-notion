@@ -1,32 +1,28 @@
-name: Sync BlogID DB from CSV
+name: 🔧 Fix Notion BlogID & UniqueID from URL
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  sync-blogid:
+  fix-notion-ids:
     runs-on: ubuntu-latest
-    steps:
-      # 1️⃣ 저장소 체크아웃
-      - uses: actions/checkout@v4
 
-      # 2️⃣ Node.js 환경 세팅
-      - uses: actions/setup-node@v4
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🧩 Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # 3️⃣ 의존성 설치
-      - name: Install dependencies
-        working-directory: ./BlogID
+      - name: 📦 Install dependencies
         run: npm install
 
-      # 4️⃣ CSV → Notion BlogID DB 반영
-      - name: Sync BlogID DB from CSV
-        working-directory: ./BlogID
+      - name: ⚙️ Run Notion ID fixer
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_DATABASE_ID_BLOGID: ${{ secrets.NOTION_DATABASE_ID_BLOGID }}
-        run: node sync-blogid-from-csv.js $GITHUB_WORKSPACE/neighbor-followings-result.csv
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          echo "🚀 Running fix-ids-from-url.js..."
+          node fix-ids-from-url.js
