@@ -17,14 +17,20 @@ export const GROUPS = [
   { id: 14, name: "03.정리" },  
   { id: 13, name: "04.Diligent" },
   { id: 17, name: "05.Influncer" },
-  { id: 2, name: "06.투자" },
-  { id: 15, name: "07.Feed" },
-  { id: 16, name: "08.Macro" },
-  { id: 3, name: "09.해외투자" }, 
-  { id: 8, name: "10.Youtuber" }, 
-  { id: 4, name: "11.증권사" }
+  { id: 19, name: "06.투자(V)" },
+  { id: 18, name: "07.투자(A)" },
+  { id: 22, name: "08.투자(CI)" },
+  { id: 23, name: "09.투자(종합)" },
+  { id: 21, name: "10.투자(세상)" },
+  { id: 2, name: "11.투자" },
+  { id: 15, name: "12.Feed" },
+  { id: 16, name: "13.Macro" },
+  { id: 24, name: "14.단순정보" },
+  { id: 4, name: "15.증권사" },
+  { id: 3, name: "16.해외투자" }
   //{ id: 5, name: "중국투자" },  
   //{ id: 9, name: "에코" },
+  //{ id: 8, name: "15.Youtuber" },
   // ✅ 새 그룹을 추가하려면 아래처럼 한 줄만 추가하세요.
   // { id: 15, name: "새그룹" },
 ];
