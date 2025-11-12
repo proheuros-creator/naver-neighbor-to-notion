@@ -29,16 +29,18 @@ if (!databaseId) {
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
 // ✅ Notion 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID_f'; // formula
-const TEXT_PROP_NAME = 'BlogID';      // text (최종 blogId 저장)
+const FORMULA_PROP_NAME = 'BlogID_f';  // (이제 참조만 가능, 채우지는 않음)
+const TEXT_PROP_NAME = 'BlogID';       // text (최종 blogId 저장)
 const YEAR_PROP_NAME = '연도';
 const YEARMONTH_PROP_NAME = '연월';
 const QUARTER_PROP_NAME = '분기';
 const DATE_PROP_NAME = '원본 날짜';
-const GROUP_PROP_NAME = 'Group';      // multi_select (CSV 기반 그룹 태그)
+const GROUP_PROP_NAME = 'Group';       // multi_select (CSV 기반 그룹 태그)
+const NICKNAME_PROP_NAME = 'Nickname'; // 닉네임 속성 (rich_text/title/select 권장)
+const URL_PROP_CANDIDATES = ['URL', 'Url', '링크', '주소', 'Link'];
 
 // ───────────────────────────────────────────────
-// 📥 neighbor-followings-result.csv → BlogID-Group 매핑
+// 📥 neighbor-followings-result.csv → BlogID-Group-Nickname 매핑
 //    실제 위치: migrate-blogid.js와 같은 폴더 (또는 FOLLOWINGS_CSV_PATH)
 // ───────────────────────────────────────────────
 const explicitCsvPath = process.env.FOLLOWINGS_CSV_PATH
@@ -56,12 +58,13 @@ if (explicitCsvPath && fs.existsSync(explicitCsvPath)) {
   }
 }
 
-const BLOGID_GROUP_MAP = new Map();
+// blogId -> { groups: string[], nickname: string }
+const BLOG_META_MAP = new Map();
 
-(function loadBlogGroupMap() {
+(function loadBlogMetaMap() {
   if (!csvPath) {
     console.warn(
-      '⚠️ neighbor-followings-result.csv 를 찾지 못했습니다. → Group 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
+      '⚠️ neighbor-followings-result.csv 를 찾지 못했습니다. → Group/Nickname 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
     );
     return;
   }
@@ -86,6 +89,8 @@ const BLOGID_GROUP_MAP = new Map();
           ''
       ).trim();
 
+      if (!blogId) continue;
+
       const rawGroup =
         row.groupNames ||
         row.GroupNames ||
@@ -101,14 +106,28 @@ const BLOGID_GROUP_MAP = new Map();
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
 
-      if (!blogId || groups.length === 0) continue;
+      const nicknameRaw =
+        row.nickname ||
+        row.nickName ||
+        row.Nickname ||
+        row.NickName ||
+        row.bloggerName ||
+        row.BloggerName ||
+        row.name ||
+        row.Name ||
+        row['별명'] ||
+        row['닉네임'] ||
+        '';
 
-      BLOGID_GROUP_MAP.set(blogId, groups);
+      BLOG_META_MAP.set(blogId, {
+        groups,
+        nickname: String(nicknameRaw || '').trim(),
+      });
       mapped++;
     }
 
     console.log(
-      `✅ CSV (${csvPath}) 에서 BlogID-Group 매핑 ${BLOGID_GROUP_MAP.size}개 로드 (rows: ${records.length})`
+      `✅ CSV (${csvPath}) 에서 BlogID-Group-Nickname 매핑 ${BLOG_META_MAP.size}개 로드 (rows: ${records.length})`
     );
   } catch (err) {
     console.error('❌ neighbor-followings-result.csv 파싱 실패:', err);
@@ -136,6 +155,18 @@ function extractFormulaValue(formulaProp) {
 function getPlainTextFromRichText(prop) {
   if (!prop || prop.type !== 'rich_text' || !prop.rich_text) return '';
   return prop.rich_text.map((r) => r.plain_text || '').join('').trim();
+}
+
+// title → plain text
+function getPlainTextFromTitle(prop) {
+  if (!prop || prop.type !== 'title' || !prop.title) return '';
+  return prop.title.map((r) => r.plain_text || '').join('').trim();
+}
+
+// select → name
+function getSelectName(prop) {
+  if (!prop || prop.type !== 'select' || !prop.select) return '';
+  return prop.select?.name?.trim() || '';
 }
 
 // multi_select → name 배열
@@ -252,11 +283,63 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
 }
 
 // ───────────────────────────────────────────────
+// URL → blogId 추출
+// ───────────────────────────────────────────────
+function extractBlogIdFromUrl(url) {
+  if (!url) return null;
+  const m = String(url).match(/blog\.naver\.com\/([^/?\s]+)\/\d+/i);
+  return m ? m[1] : null;
+}
+
+// 페이지의 속성들에서 URL 찾아오기
+function getUrlFromProperties(props) {
+  // 1) 후보 이름으로 직접 찾기
+  for (const name of URL_PROP_CANDIDATES) {
+    if (props[name] && props[name].type === 'url') {
+      return props[name].url || '';
+    }
+  }
+  // 2) 어떤 이름이든 type이 url인 속성 찾기
+  for (const [k, v] of Object.entries(props)) {
+    if (v && v.type === 'url' && typeof v.url === 'string' && v.url) {
+      return v.url;
+    }
+  }
+  return '';
+}
+
+// Nickname 현재값 가져오기 (타입별)
+function getCurrentNickname(props) {
+  const p = props[NICKNAME_PROP_NAME];
+  if (!p) return '';
+  if (p.type === 'rich_text') return getPlainTextFromRichText(p);
+  if (p.type === 'title') return getPlainTextFromTitle(p);
+  if (p.type === 'select') return getSelectName(p);
+  return ''; // people/relation 등은 동기화 대상에서 제외
+}
+
+// Nickname 업데이트 payload 만들기 (타입별)
+function buildNicknameUpdate(prop, nickname) {
+  if (!prop || !nickname) return null;
+  if (prop.type === 'rich_text') {
+    return { [NICKNAME_PROP_NAME]: { rich_text: [{ text: { content: nickname } }] } };
+  }
+  if (prop.type === 'title') {
+    return { [NICKNAME_PROP_NAME]: { title: [{ text: { content: nickname } }] } };
+  }
+  if (prop.type === 'select') {
+    return { [NICKNAME_PROP_NAME]: { select: { name: nickname } } };
+  }
+  // people / relation 등은 스킵
+  return null;
+}
+
+// ───────────────────────────────────────────────
 // 🚀 메인 마이그레이션
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
-    `🚀 BlogID_f → BlogID + 연도/연월/분기 + Group(sync) 마이그레이션 시작` +
+    `🚀 URL→BlogID + 연도/연월/분기 + Group(sync) + Nickname(CSV) 마이그레이션 시작` +
       (MIGRATE_LIMIT
         ? ` (이번 실행 최대 ${MIGRATE_LIMIT}건 업데이트)`
         : ' (업데이트 건수 제한 없음)')
@@ -270,6 +353,7 @@ async function migrate() {
   let updatedYearMonth = 0;
   let updatedQuarter = 0;
   let updatedGroup = 0;
+  let updatedNickname = 0;
 
   while (true) {
     const resp = await queryWithRetry({
@@ -293,20 +377,29 @@ async function migrate() {
       const props = page.properties;
       const updates = {};
 
-      // 1) BlogID_f → BlogID (빈 경우만)
+      // 0) URL에서 blogId 추출 (기본 소스)
+      const url = getUrlFromProperties(props);
+      const blogIdFromUrl = extractBlogIdFromUrl(url);
+
+      // (참고) formula나 기존 텍스트 값도 구해두되, 우선순위는 URL
       const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
       const blogIdText = getPlainTextFromRichText(props[TEXT_PROP_NAME]);
 
-      if (formulaValue && !blogIdText) {
-        updates[TEXT_PROP_NAME] = {
-          rich_text: [{ text: { content: formulaValue } }],
-        };
-        updatedBlogId++;
+      // 텍스트 BlogID가 비어있거나 URL에서 추출한 값과 다르면 URL값으로 동기화
+      if (blogIdFromUrl) {
+        if (!blogIdText || blogIdText !== blogIdFromUrl) {
+          if (props[TEXT_PROP_NAME]?.type === 'rich_text') {
+            updates[TEXT_PROP_NAME] = {
+              rich_text: [{ text: { content: blogIdFromUrl } }],
+            };
+            updatedBlogId++;
+          }
+        }
       }
 
-      const effectiveBlogId = (blogIdText || formulaValue || '').trim();
+      const effectiveBlogId = (blogIdFromUrl || blogIdText || formulaValue || '').trim();
 
-      // 2) 연도/연월/분기 (각각 비어 있을 때만)
+      // 1) 연도/연월/분기 (각각 비어 있을 때만)
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
@@ -339,27 +432,37 @@ async function migrate() {
         }
       }
 
-      // 3) Group 동기화 (multi_select)
+      // 2) Group 동기화 (multi_select) — CSV 기준
       if (
         effectiveBlogId &&
-        BLOGID_GROUP_MAP.size > 0 &&
+        BLOG_META_MAP.size > 0 &&
         props[GROUP_PROP_NAME]
       ) {
-        const expectedGroups = BLOGID_GROUP_MAP.get(effectiveBlogId); // ['A', 'B', ...]
-        if (expectedGroups && expectedGroups.length > 0) {
+        const expectedGroups = BLOG_META_MAP.get(effectiveBlogId)?.groups || [];
+        if (expectedGroups.length > 0) {
           if (props[GROUP_PROP_NAME].type === 'multi_select') {
             const currentGroups = getMultiSelectNames(props[GROUP_PROP_NAME]);
-
-            // 다를 때만 업데이트 → 여러 번 실행해도 이미 맞으면 스킵
             if (!arraysEqualIgnoreOrder(currentGroups, expectedGroups)) {
               updates[GROUP_PROP_NAME] = {
                 multi_select: expectedGroups.map((name) => ({ name })),
               };
               updatedGroup++;
             }
-          } else {
-            // 타입이 multi_select가 아니면 건너뜀 (스키마 불일치)
-            // 필요하면 여기서 console.warn 찍어도 됨
+          }
+        }
+      }
+
+      // 3) Nickname 동기화 (CSV 우선) — text/title/select 지원
+      if (effectiveBlogId && BLOG_META_MAP.size > 0 && props[NICKNAME_PROP_NAME]) {
+        const nicknameCsv = BLOG_META_MAP.get(effectiveBlogId)?.nickname || '';
+        if (nicknameCsv) {
+          const curNickname = getCurrentNickname(props);
+          if (curNickname !== nicknameCsv) {
+            const nickUpdate = buildNicknameUpdate(props[NICKNAME_PROP_NAME], nicknameCsv);
+            if (nickUpdate) {
+              Object.assign(updates, nickUpdate);
+              updatedNickname++;
+            }
           }
         }
       }
@@ -382,7 +485,7 @@ async function migrate() {
             `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
           );
           console.log(
-            `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
+            `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
           );
           return;
         }
@@ -390,7 +493,7 @@ async function migrate() {
 
       if (scanned % 500 === 0) {
         console.log(
-          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
+          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
         );
       }
     }
@@ -400,7 +503,7 @@ async function migrate() {
   }
 
   console.log(
-    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup}`
+    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
   );
 }
 
