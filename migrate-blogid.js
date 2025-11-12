@@ -5,8 +5,8 @@
  *  - URL(https://blog.naver.com/{blogId}/{postId})에서 blogId 추출 → BlogID(Text) 동기화
  *  - neighbor-followings-result.csv에서 Group(multi_select), Nickname 동기화
  *  - 원본 날짜(Date)로 연/연월/분기 채움 (비어 있을 때만)
- *  - ✅ 방법 A: Notion DB의 ProcessedAt(Date)로 처리 완료 마킹
- *      → 쿼리 시 ProcessedAt is empty 만 가져와, 재실행 시 중복 스캔 방지
+ *  - ✅ 방법 A: Notion DB의 ProcessedAt(Date)로 처리 완료 마킹(중복 스캔 방지)
+ *  - ✅ 정렬 기준: DB의 "생성 일시"(date 속성) 기준으로 **가장 최신부터** 처리
  */
 
 import 'dotenv/config';
@@ -38,16 +38,17 @@ if (!databaseId) {
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
 // ✅ Notion 속성 이름
-const FORMULA_PROP_NAME   = 'BlogID_f';   // (참조만)
-const TEXT_PROP_NAME      = 'BlogID';     // rich_text(Text)
-const YEAR_PROP_NAME      = '연도';        // rich_text(Text)
-const YEARMONTH_PROP_NAME = '연월';        // rich_text(Text)
-const QUARTER_PROP_NAME   = '분기';        // rich_text(Text)
-const DATE_PROP_NAME      = '원본 날짜';    // date
-const GROUP_PROP_NAME     = 'Group';      // multi_select
-const NICKNAME_PROP_NAME  = 'Nickname';   // rich_text or title or select
-const PROCESSED_PROP_NAME = 'ProcessedAt';// date (방법 A 핵심)
-const URL_PROP_CANDIDATES = ['URL', 'Url', '링크', '주소', 'Link'];
+const FORMULA_PROP_NAME    = 'BlogID_f';     // (참조만)
+const TEXT_PROP_NAME       = 'BlogID';       // rich_text(Text)
+const YEAR_PROP_NAME       = '연도';          // rich_text(Text)
+const YEARMONTH_PROP_NAME  = '연월';          // rich_text(Text)
+const QUARTER_PROP_NAME    = '분기';          // rich_text(Text)
+const DATE_PROP_NAME       = '원본 날짜';      // date
+const GROUP_PROP_NAME      = 'Group';        // multi_select
+const NICKNAME_PROP_NAME   = 'Nickname';     // rich_text or title or select
+const PROCESSED_PROP_NAME  = 'ProcessedAt';  // date (방법 A 핵심)
+const CREATION_PROP_NAME   = '생성 일시';     // ✅ 정렬 기준으로 사용할 DB의 date 속성
+const URL_PROP_CANDIDATES  = ['URL', 'Url', '링크', '주소', 'Link'];
 
 // ───────────────────────────────────────────────
 // CSV 로드 (blogId → groups[], nickname)
@@ -249,7 +250,7 @@ async function safeUpdatePage(pageId, properties, retries = 3) {
 }
 
 // ───────────────────────────────────────────────
-// 🚀 메인 (방법 A: ProcessedAt 마킹)
+/** 🚀 메인 (방법 A: ProcessedAt 마킹 + "생성 일시" 기준 최신부터 처리) */
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
@@ -278,6 +279,8 @@ async function migrate() {
         property: PROCESSED_PROP_NAME,
         date: { is_empty: true },
       },
+      // ✅ 정렬: DB의 "생성 일시"(date 속성) 기준 최신부터
+      sorts: [{ property: CREATION_PROP_NAME, direction: 'descending' }],
     });
 
     const pages = resp.results || [];
