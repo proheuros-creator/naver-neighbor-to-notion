@@ -1,3 +1,14 @@
+/**
+ * migrate-url-blogid-group-nickname-processed.js
+ * ───────────────────────────────────────────────
+ * 🧭 기능 요약
+ *  - URL(https://blog.naver.com/{blogId}/{postId})에서 blogId 추출 → BlogID(Text) 동기화
+ *  - neighbor-followings-result.csv에서 Group(multi_select), Nickname 동기화
+ *  - 원본 날짜(Date)로 연/연월/분기 채움 (비어 있을 때만)
+ *  - ✅ 방법 A: Notion DB의 ProcessedAt(Date)로 처리 완료 마킹
+ *      → 쿼리 시 ProcessedAt is empty 만 가져와, 재실행 시 중복 스캔 방지
+ */
+
 import 'dotenv/config';
 import { Client } from '@notionhq/client';
 import fs from 'fs';
@@ -7,11 +18,11 @@ import { fileURLToPath } from 'url';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
-// ESM 환경용 __dirname
+// ESM __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ 마이그레이션 대상 DB
+// ✅ 대상 DB
 const databaseId =
   process.env.MIGRATE_DATABASE_ID ||
   process.env.NOTION_DATABASE_ID ||
@@ -19,131 +30,86 @@ const databaseId =
   process.env.NOTION_DATABASE_ID_BLOGSCARPTEMP;
 
 if (!databaseId) {
-  console.error(
-    '❌ 마이그레이션 대상 DB ID가 없습니다. MIGRATE_DATABASE_ID 또는 관련 NOTION_DATABASE_ID_* 환경변수를 설정하세요.'
-  );
+  console.error('❌ DB ID가 없습니다. MIGRATE_DATABASE_ID 또는 NOTION_DATABASE_ID_* 를 설정하세요.');
   process.exit(1);
 }
 
-// ✅ 이번 실행에서 실제 업데이트 최대 건수 (0 = 제한 없음)
+// ✅ 실행당 최대 업데이트 건수 (0 = 제한 없음)
 const MIGRATE_LIMIT = parseInt(process.env.MIGRATE_LIMIT || '0', 10) || 0;
 
-// ✅ Notion 속성 이름들
-const FORMULA_PROP_NAME = 'BlogID_f';  // (이제 참조만 가능, 채우지는 않음)
-const TEXT_PROP_NAME = 'BlogID';       // text (최종 blogId 저장)
-const YEAR_PROP_NAME = '연도';
-const YEARMONTH_PROP_NAME = '연월';
-const QUARTER_PROP_NAME = '분기';
-const DATE_PROP_NAME = '원본 날짜';
-const GROUP_PROP_NAME = 'Group';       // multi_select (CSV 기반 그룹 태그)
-const NICKNAME_PROP_NAME = 'Nickname'; // 닉네임 속성 (rich_text/title/select 권장)
+// ✅ Notion 속성 이름
+const FORMULA_PROP_NAME   = 'BlogID_f';   // (참조만)
+const TEXT_PROP_NAME      = 'BlogID';     // rich_text(Text)
+const YEAR_PROP_NAME      = '연도';        // rich_text(Text)
+const YEARMONTH_PROP_NAME = '연월';        // rich_text(Text)
+const QUARTER_PROP_NAME   = '분기';        // rich_text(Text)
+const DATE_PROP_NAME      = '원본 날짜';    // date
+const GROUP_PROP_NAME     = 'Group';      // multi_select
+const NICKNAME_PROP_NAME  = 'Nickname';   // rich_text or title or select
+const PROCESSED_PROP_NAME = 'ProcessedAt';// date (방법 A 핵심)
 const URL_PROP_CANDIDATES = ['URL', 'Url', '링크', '주소', 'Link'];
 
 // ───────────────────────────────────────────────
-// 📥 neighbor-followings-result.csv → BlogID-Group-Nickname 매핑
-//    실제 위치: migrate-blogid.js와 같은 폴더 (또는 FOLLOWINGS_CSV_PATH)
+// CSV 로드 (blogId → groups[], nickname)
 // ───────────────────────────────────────────────
 const explicitCsvPath = process.env.FOLLOWINGS_CSV_PATH
   ? path.resolve(process.env.FOLLOWINGS_CSV_PATH)
   : null;
 
 let csvPath = null;
-
 if (explicitCsvPath && fs.existsSync(explicitCsvPath)) {
   csvPath = explicitCsvPath;
 } else {
   const sameDirPath = path.resolve(__dirname, 'neighbor-followings-result.csv');
-  if (fs.existsSync(sameDirPath)) {
-    csvPath = sameDirPath;
-  }
+  if (fs.existsSync(sameDirPath)) csvPath = sameDirPath;
 }
 
-// blogId -> { groups: string[], nickname: string }
-const BLOG_META_MAP = new Map();
+const BLOG_META_MAP = new Map(); // blogId → { groups: string[], nickname: string }
 
-(function loadBlogMetaMap() {
+(function loadBlogMeta() {
   if (!csvPath) {
-    console.warn(
-      '⚠️ neighbor-followings-result.csv 를 찾지 못했습니다. → Group/Nickname 매핑 없이 BlogID/연도 관련 마이그레이션만 수행합니다.'
-    );
+    console.warn('⚠️ CSV를 찾지 못했습니다. → Group/Nickname 동기화 없이 진행합니다.');
     return;
   }
-
   try {
     const records = parse(fs.readFileSync(csvPath), {
       columns: true,
       skip_empty_lines: true,
       trim: true,
     });
-
-    let mapped = 0;
-
     for (const row of records) {
       const blogId = String(
-        row.blogID ||
-          row.blogId ||
-          row.blogid ||
-          row.BlogID ||
-          row.BLOGID ||
-          row.blog_id ||
-          ''
+        row.blogID || row.blogId || row.blogid || row.BlogID || row.BLOGID || row.blog_id || ''
       ).trim();
-
       if (!blogId) continue;
 
       const rawGroup =
-        row.groupNames ||
-        row.GroupNames ||
-        row.groupName ||
-        row.GroupName ||
-        row.group ||
-        row.Group ||
-        '';
-
-      // "A,B,C" 형태도 지원
+        row.groupNames || row.GroupNames || row.groupName || row.GroupName || row.group || row.Group || '';
       const groups = String(rawGroup || '')
         .split(',')
         .map((v) => v.trim())
-        .filter((v) => v.length > 0);
+        .filter(Boolean);
 
       const nicknameRaw =
-        row.nickname ||
-        row.nickName ||
-        row.Nickname ||
-        row.NickName ||
-        row.bloggerName ||
-        row.BloggerName ||
-        row.name ||
-        row.Name ||
-        row['별명'] ||
-        row['닉네임'] ||
-        '';
+        row.nickname || row.nickName || row.Nickname || row.NickName ||
+        row.bloggerName || row.BloggerName || row.name || row.Name ||
+        row['별명'] || row['닉네임'] || '';
 
-      BLOG_META_MAP.set(blogId, {
-        groups,
-        nickname: String(nicknameRaw || '').trim(),
-      });
-      mapped++;
+      BLOG_META_MAP.set(blogId, { groups, nickname: String(nicknameRaw || '').trim() });
     }
-
-    console.log(
-      `✅ CSV (${csvPath}) 에서 BlogID-Group-Nickname 매핑 ${BLOG_META_MAP.size}개 로드 (rows: ${records.length})`
-    );
+    console.log(`✅ CSV 로드: ${BLOG_META_MAP.size}개 blogId 매핑 (from ${csvPath})`);
   } catch (err) {
-    console.error('❌ neighbor-followings-result.csv 파싱 실패:', err);
+    console.error('❌ CSV 파싱 실패:', err);
   }
 })();
 
 // ───────────────────────────────────────────────
-// 유틸 함수들
+// 유틸
 // ───────────────────────────────────────────────
-
-// formula → string
-function extractFormulaValue(formulaProp) {
-  if (!formulaProp || formulaProp.type !== 'formula') return null;
-  const f = formulaProp.formula;
+function extractFormulaValue(prop) {
+  if (!prop || prop.type !== 'formula') return null;
+  const f = prop.formula;
   if (!f) return null;
-
   if (f.type === 'string') return f.string || null;
   if (f.type === 'number' && f.number != null) return String(f.number);
   if (f.type === 'boolean') return String(f.boolean);
@@ -151,33 +117,26 @@ function extractFormulaValue(formulaProp) {
   return null;
 }
 
-// rich_text → plain text
 function getPlainTextFromRichText(prop) {
   if (!prop || prop.type !== 'rich_text' || !prop.rich_text) return '';
   return prop.rich_text.map((r) => r.plain_text || '').join('').trim();
 }
 
-// title → plain text
 function getPlainTextFromTitle(prop) {
   if (!prop || prop.type !== 'title' || !prop.title) return '';
   return prop.title.map((r) => r.plain_text || '').join('').trim();
 }
 
-// select → name
 function getSelectName(prop) {
   if (!prop || prop.type !== 'select' || !prop.select) return '';
   return prop.select?.name?.trim() || '';
 }
 
-// multi_select → name 배열
 function getMultiSelectNames(prop) {
   if (!prop || prop.type !== 'multi_select' || !prop.multi_select) return [];
-  return prop.multi_select
-    .map((o) => (o && o.name ? o.name.trim() : ''))
-    .filter((v) => v.length > 0);
+  return prop.multi_select.map((o) => (o?.name ? o.name.trim() : '')).filter(Boolean);
 }
 
-// 배열 비교 (순서 무시)
 function arraysEqualIgnoreOrder(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   if (a.length !== b.length) return false;
@@ -186,139 +145,46 @@ function arraysEqualIgnoreOrder(a, b) {
   return sa.every((v, i) => v === sb[i]);
 }
 
-// 날짜 → 연/연월/분기
 function extractYyYmQ(dateProp) {
   if (!dateProp || dateProp.type !== 'date' || !dateProp.date?.start) {
     return { year: null, yearMonth: null, quarter: null };
   }
-
-  const raw = dateProp.date.start;
-  const d = new Date(raw);
-  if (isNaN(d.getTime())) {
-    return { year: null, yearMonth: null, quarter: null };
-  }
-
+  const d = new Date(dateProp.date.start);
+  if (isNaN(d.getTime())) return { year: null, yearMonth: null, quarter: null };
   const year = String(d.getFullYear());
-  const month = d.getMonth() + 1;
-  const mm = String(month).padStart(2, '0');
+  const m = d.getMonth() + 1;
+  const mm = String(m).padStart(2, '0');
   const yearMonth = `${year}-${mm}`;
-  const q = month <= 3 ? 'Q1' : month <= 6 ? 'Q2' : month <= 9 ? 'Q3' : 'Q4';
+  const q = m <= 3 ? 'Q1' : m <= 6 ? 'Q2' : m <= 9 ? 'Q3' : 'Q4';
   const quarter = `${year}-${q}`;
-
   return { year, yearMonth, quarter };
 }
 
-// databases.query 재시도
-async function queryWithRetry(params, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await notion.databases.query(params);
-    } catch (err) {
-      const code = err.code || err.status || err.name;
-      const msg = err.message || String(err);
-
-      const retriable =
-        code === 'notionhq_client_request_timeout' ||
-        code === 'rate_limited' ||
-        code === 'ECONNRESET' ||
-        code === 'service_unavailable' ||
-        err.status === 503 ||
-        msg.includes('socket hang up') ||
-        msg.includes('ECONNRESET');
-
-      console.warn(
-        `⚠️ databases.query 실패 (${attempt}/${retries}) : [${code}] ${msg}`
-      );
-
-      if (!retriable || attempt === retries) {
-        console.error('❌ databases.query 재시도 한계 도달, 에러 발생');
-        throw err;
-      }
-
-      const delay = 1000 * attempt;
-      console.log(`⏳ ${delay / 1000}s 대기 후 databases.query 재시도...`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-}
-
-// pages.update 재시도
-async function safeUpdatePage(pageId, properties, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await notion.pages.update({
-        page_id: pageId,
-        properties,
-      });
-      return;
-    } catch (err) {
-      const code = err.code || err.status || err.name;
-      const msg = err.message || String(err);
-
-      const retriable =
-        code === 'notionhq_client_request_timeout' ||
-        code === 'rate_limited' ||
-        code === 'ECONNRESET' ||
-        code === 'service_unavailable' ||
-        err.status === 503 ||
-        msg.includes('socket hang up') ||
-        msg.includes('ECONNRESET');
-
-      console.warn(
-        `⚠️ Notion 업데이트 실패 (${attempt}/${retries}) : [${code}] ${msg} (page: ${pageId})`
-      );
-
-      if (!retriable || attempt === retries) {
-        console.error(
-          `❌ Notion 업데이트 포기 (page: ${pageId}) → 이 페이지는 건너뜀`
-        );
-        throw err;
-      }
-
-      const delay = 1000 * attempt;
-      console.log(`⏳ ${delay / 1000}s 대기 후 update 재시도...`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-}
-
-// ───────────────────────────────────────────────
-// URL → blogId 추출
-// ───────────────────────────────────────────────
 function extractBlogIdFromUrl(url) {
   if (!url) return null;
   const m = String(url).match(/blog\.naver\.com\/([^/?\s]+)\/\d+/i);
   return m ? m[1] : null;
 }
 
-// 페이지의 속성들에서 URL 찾아오기
 function getUrlFromProperties(props) {
-  // 1) 후보 이름으로 직접 찾기
   for (const name of URL_PROP_CANDIDATES) {
-    if (props[name] && props[name].type === 'url') {
-      return props[name].url || '';
-    }
+    if (props[name]?.type === 'url') return props[name].url || '';
   }
-  // 2) 어떤 이름이든 type이 url인 속성 찾기
-  for (const [k, v] of Object.entries(props)) {
-    if (v && v.type === 'url' && typeof v.url === 'string' && v.url) {
-      return v.url;
-    }
+  for (const v of Object.values(props)) {
+    if (v?.type === 'url' && typeof v.url === 'string' && v.url) return v.url;
   }
   return '';
 }
 
-// Nickname 현재값 가져오기 (타입별)
 function getCurrentNickname(props) {
   const p = props[NICKNAME_PROP_NAME];
   if (!p) return '';
   if (p.type === 'rich_text') return getPlainTextFromRichText(p);
   if (p.type === 'title') return getPlainTextFromTitle(p);
   if (p.type === 'select') return getSelectName(p);
-  return ''; // people/relation 등은 동기화 대상에서 제외
+  return ''; // people/relation 등은 동기화 제외
 }
 
-// Nickname 업데이트 payload 만들기 (타입별)
 function buildNicknameUpdate(prop, nickname) {
   if (!prop || !nickname) return null;
   if (prop.type === 'rich_text') {
@@ -330,19 +196,65 @@ function buildNicknameUpdate(prop, nickname) {
   if (prop.type === 'select') {
     return { [NICKNAME_PROP_NAME]: { select: { name: nickname } } };
   }
-  // people / relation 등은 스킵
   return null;
 }
 
+async function queryWithRetry(params, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await notion.databases.query(params);
+    } catch (err) {
+      const code = err.code || err.status || err.name;
+      const msg = err.message || String(err);
+      const retriable =
+        code === 'notionhq_client_request_timeout' ||
+        code === 'rate_limited' ||
+        code === 'ECONNRESET' ||
+        code === 'service_unavailable' ||
+        err.status === 503 ||
+        msg.includes('socket hang up') ||
+        msg.includes('ECONNRESET');
+      console.warn(`⚠️ databases.query 실패 (${attempt}/${retries}) : [${code}] ${msg}`);
+      if (!retriable || attempt === retries) throw err;
+      const delay = 1000 * attempt;
+      console.log(`⏳ ${delay / 1000}s 대기 후 재시도...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
+async function safeUpdatePage(pageId, properties, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await notion.pages.update({ page_id: pageId, properties });
+      return;
+    } catch (err) {
+      const code = err.code || err.status || err.name;
+      const msg = err.message || String(err);
+      const retriable =
+        code === 'notionhq_client_request_timeout' ||
+        code === 'rate_limited' ||
+        code === 'ECONNRESET' ||
+        code === 'service_unavailable' ||
+        err.status === 503 ||
+        msg.includes('socket hang up') ||
+        msg.includes('ECONNRESET');
+      console.warn(`⚠️ update 실패 (${attempt}/${retries}) : [${code}] ${msg} (page: ${pageId})`);
+      if (!retriable || attempt === retries) throw err;
+      const delay = 1000 * attempt;
+      console.log(`⏳ ${delay / 1000}s 대기 후 재시도...`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 // ───────────────────────────────────────────────
-// 🚀 메인 마이그레이션
+// 🚀 메인 (방법 A: ProcessedAt 마킹)
 // ───────────────────────────────────────────────
 async function migrate() {
   console.log(
-    `🚀 URL→BlogID + 연도/연월/분기 + Group(sync) + Nickname(CSV) 마이그레이션 시작` +
-      (MIGRATE_LIMIT
-        ? ` (이번 실행 최대 ${MIGRATE_LIMIT}건 업데이트)`
-        : ' (업데이트 건수 제한 없음)')
+    `🚀 URL→BlogID + 연/연월/분기 + Group(sync) + Nickname(CSV) + ProcessedAt 마이그레이션 시작` +
+      (MIGRATE_LIMIT ? ` (최대 ${MIGRATE_LIMIT}건)` : '')
   );
 
   let cursor;
@@ -354,17 +266,22 @@ async function migrate() {
   let updatedQuarter = 0;
   let updatedGroup = 0;
   let updatedNickname = 0;
+  let processedMarkedOnly = 0;
 
   while (true) {
     const resp = await queryWithRetry({
       database_id: databaseId,
       start_cursor: cursor,
       page_size: 50,
+      // ✔ 처리 안 된 페이지만 스캔
+      filter: {
+        property: PROCESSED_PROP_NAME,
+        date: { is_empty: true },
+      },
     });
 
     const pages = resp.results || [];
     console.log(`📥 batch 수신: ${pages.length}개`);
-
     if (pages.length === 0) {
       if (!resp.has_more) break;
       cursor = resp.next_cursor;
@@ -373,41 +290,31 @@ async function migrate() {
 
     for (const page of pages) {
       scanned++;
-
       const props = page.properties;
       const updates = {};
 
-      // 0) URL에서 blogId 추출 (기본 소스)
+      // 1) URL → blogId
       const url = getUrlFromProperties(props);
       const blogIdFromUrl = extractBlogIdFromUrl(url);
-
-      // (참고) formula나 기존 텍스트 값도 구해두되, 우선순위는 URL
       const formulaValue = extractFormulaValue(props[FORMULA_PROP_NAME]);
       const blogIdText = getPlainTextFromRichText(props[TEXT_PROP_NAME]);
 
-      // 텍스트 BlogID가 비어있거나 URL에서 추출한 값과 다르면 URL값으로 동기화
-      if (blogIdFromUrl) {
+      if (blogIdFromUrl && props[TEXT_PROP_NAME]?.type === 'rich_text') {
         if (!blogIdText || blogIdText !== blogIdFromUrl) {
-          if (props[TEXT_PROP_NAME]?.type === 'rich_text') {
-            updates[TEXT_PROP_NAME] = {
-              rich_text: [{ text: { content: blogIdFromUrl } }],
-            };
-            updatedBlogId++;
-          }
+          updates[TEXT_PROP_NAME] = { rich_text: [{ text: { content: blogIdFromUrl } }] };
+          updatedBlogId++;
         }
       }
 
       const effectiveBlogId = (blogIdFromUrl || blogIdText || formulaValue || '').trim();
 
-      // 1) 연도/연월/분기 (각각 비어 있을 때만)
+      // 2) 연/연월/분기 (비어 있을 때만)
       const { year, yearMonth, quarter } = extractYyYmQ(props[DATE_PROP_NAME]);
 
       if (year && props[YEAR_PROP_NAME]) {
         const cur = getPlainTextFromRichText(props[YEAR_PROP_NAME]);
         if (!cur) {
-          updates[YEAR_PROP_NAME] = {
-            rich_text: [{ text: { content: year } }],
-          };
+          updates[YEAR_PROP_NAME] = { rich_text: [{ text: { content: year } }] };
           updatedYear++;
         }
       }
@@ -415,9 +322,7 @@ async function migrate() {
       if (yearMonth && props[YEARMONTH_PROP_NAME]) {
         const cur = getPlainTextFromRichText(props[YEARMONTH_PROP_NAME]);
         if (!cur) {
-          updates[YEARMONTH_PROP_NAME] = {
-            rich_text: [{ text: { content: yearMonth } }],
-          };
+          updates[YEARMONTH_PROP_NAME] = { rich_text: [{ text: { content: yearMonth } }] };
           updatedYearMonth++;
         }
       }
@@ -425,34 +330,26 @@ async function migrate() {
       if (quarter && props[QUARTER_PROP_NAME]) {
         const cur = getPlainTextFromRichText(props[QUARTER_PROP_NAME]);
         if (!cur) {
-          updates[QUARTER_PROP_NAME] = {
-            rich_text: [{ text: { content: quarter } }],
-          };
+          updates[QUARTER_PROP_NAME] = { rich_text: [{ text: { content: quarter } }] };
           updatedQuarter++;
         }
       }
 
-      // 2) Group 동기화 (multi_select) — CSV 기준
-      if (
-        effectiveBlogId &&
-        BLOG_META_MAP.size > 0 &&
-        props[GROUP_PROP_NAME]
-      ) {
+      // 3) Group 동기화 (multi_select)
+      if (effectiveBlogId && BLOG_META_MAP.size > 0 && props[GROUP_PROP_NAME]?.type === 'multi_select') {
         const expectedGroups = BLOG_META_MAP.get(effectiveBlogId)?.groups || [];
         if (expectedGroups.length > 0) {
-          if (props[GROUP_PROP_NAME].type === 'multi_select') {
-            const currentGroups = getMultiSelectNames(props[GROUP_PROP_NAME]);
-            if (!arraysEqualIgnoreOrder(currentGroups, expectedGroups)) {
-              updates[GROUP_PROP_NAME] = {
-                multi_select: expectedGroups.map((name) => ({ name })),
-              };
-              updatedGroup++;
-            }
+          const currentGroups = getMultiSelectNames(props[GROUP_PROP_NAME]);
+          if (!arraysEqualIgnoreOrder(currentGroups, expectedGroups)) {
+            updates[GROUP_PROP_NAME] = {
+              multi_select: expectedGroups.map((name) => ({ name })),
+            };
+            updatedGroup++;
           }
         }
       }
 
-      // 3) Nickname 동기화 (CSV 우선) — text/title/select 지원
+      // 4) Nickname 동기화 (CSV 우선): rich_text/title/select 지원
       if (effectiveBlogId && BLOG_META_MAP.size > 0 && props[NICKNAME_PROP_NAME]) {
         const nicknameCsv = BLOG_META_MAP.get(effectiveBlogId)?.nickname || '';
         if (nicknameCsv) {
@@ -467,33 +364,31 @@ async function migrate() {
         }
       }
 
-      // 실제로 바꿀 값이 있을 때만 업데이트
-      if (Object.keys(updates).length > 0) {
-        try {
-          await safeUpdatePage(page.id, updates);
-          updatedPages++;
-        } catch {
-          // safeUpdatePage에서 로그 처리함 → 계속 진행
-        }
+      // 5) 처리 마킹 (업데이트 여부와 무관하게 이번 배치에서 본 것은 마킹)
+      updates[PROCESSED_PROP_NAME] = { date: { start: new Date().toISOString() } };
 
-        // rate limit 완화
-        await new Promise((r) => setTimeout(r, 80));
+      try {
+        await safeUpdatePage(page.id, updates);
+        updatedPages++;
+        if (Object.keys(updates).length === 1) processedMarkedOnly++; // ProcessedAt만 변경한 경우
+      } catch {
+        // 에러 로그는 safeUpdatePage 내부에서 처리
+      }
 
-        // MIGRATE_LIMIT 도달 체크
-        if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
-          console.log(
-            `⏹ MIGRATE_LIMIT(${MIGRATE_LIMIT}) 도달 → 이번 실행 종료`
-          );
-          console.log(
-            `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
-          );
-          return;
-        }
+      // rate limit 완화
+      await new Promise((r) => setTimeout(r, 80));
+
+      if (MIGRATE_LIMIT && updatedPages >= MIGRATE_LIMIT) {
+        console.log('⏹ MIGRATE_LIMIT 도달 → 종료');
+        console.log(
+          `🎉 최종: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname} / 마킹만 ${processedMarkedOnly}`
+        );
+        return;
       }
 
       if (scanned % 500 === 0) {
         console.log(
-          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
+          `📊 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname} / 마킹만 ${processedMarkedOnly}`
         );
       }
     }
@@ -503,11 +398,11 @@ async function migrate() {
   }
 
   console.log(
-    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname}`
+    `🎉 완료: 스캔 ${scanned} / 업데이트 ${updatedPages} / BlogID ${updatedBlogId} / 연도 ${updatedYear} / 연월 ${updatedYearMonth} / 분기 ${updatedQuarter} / Group ${updatedGroup} / Nickname ${updatedNickname} / 마킹만 ${processedMarkedOnly}`
   );
 }
 
 migrate().catch((err) => {
-  console.error('❌ 마이그레이션 중 오류:', err);
+  console.error('❌ 마이그레이션 오류:', err);
   process.exit(1);
 });
