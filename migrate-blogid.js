@@ -280,7 +280,7 @@ async function migrate() {
         date: { is_empty: true },
       },
       // ✅ 정렬: DB의 "생성 일시"(date 속성) 기준 최신부터
-      sorts: [{ property: CREATION_PROP_NAME, direction: 'descending' }],
+      sorts: [{ property: CREATION_PROP_NAME, direction: 'ascending' }],
     });
 
     const pages = resp.results || [];
