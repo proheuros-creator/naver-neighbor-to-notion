@@ -1,28 +1,53 @@
-name: 🔧 Fix Notion BlogID & UniqueID from URL
+name: BlogID Scan & Notion Sync
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  fix-notion-ids:
+  scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📦 Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🧩 Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: 📦 Install dependencies
+      - name: Install deps
+        working-directory: ./BlogID
         run: npm install
 
-      - name: ⚙️ Run Notion ID fixer
+      - name: Run script (generate CSV)
+        working-directory: ./BlogID
         env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+        run: npm start
+
+      - name: Sync to Notion
+        if: ${{ success() }}
+        working-directory: ./BlogID
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: npm run sync:notion
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neighbor-followings-result
+          path: BlogID/neighbor-followings-result.csv
+
+      # (옵션) 레포에 CSV 커밋까지 남기고 싶으면
+      - name: Commit result CSV to repo
+        if: ${{ success() }}
         run: |
-          echo "🚀 Running fix-ids-from-url.js..."
-          node fix-ids-from-url.js
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          cp BlogID/neighbor-followings-result.csv ./neighbor-followings-result.csv
+          git add neighbor-followings-result.csv
+          git commit -m "Update neighbor followings result [skip ci]" || echo "No changes"
+          git push
