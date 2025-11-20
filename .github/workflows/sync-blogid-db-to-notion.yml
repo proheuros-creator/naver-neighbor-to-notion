@@ -1,53 +1,32 @@
-name: BlogID Scan & Notion Sync
+name: Sync BlogID DB from CSV
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  scan:
+  sync-blogid:
     runs-on: ubuntu-latest
-
     steps:
+      # 1️⃣ 저장소 체크아웃
       - uses: actions/checkout@v4
 
+      # 2️⃣ Node.js 환경 세팅
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install deps
+      # 3️⃣ 의존성 설치
+      - name: Install dependencies
         working-directory: ./BlogID
         run: npm install
 
-      - name: Run script (generate CSV)
+      # 4️⃣ CSV → Notion BlogID DB 반영
+      - name: Sync BlogID DB from CSV
         working-directory: ./BlogID
         env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
-        run: npm start
-
-      - name: Sync to Notion
-        if: ${{ success() }}
-        working-directory: ./BlogID
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: npm run sync:notion
-
-      - name: Upload CSV artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: neighbor-followings-result
-          path: BlogID/neighbor-followings-result.csv
-
-      # (옵션) 레포에 CSV 커밋까지 남기고 싶으면
-      - name: Commit result CSV to repo
-        if: ${{ success() }}
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          cp BlogID/neighbor-followings-result.csv ./neighbor-followings-result.csv
-          git add neighbor-followings-result.csv
-          git commit -m "Update neighbor followings result [skip ci]" || echo "No changes"
-          git push
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID_BLOGID: ${{ secrets.NOTION_DATABASE_ID_BLOGID }}
+        run: node sync-blogid-from-csv.js $GITHUB_WORKSPACE/neighbor-followings-result.csv
