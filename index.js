@@ -271,21 +271,6 @@ async function fetchPagePosts(page) {
     console.log(`ℹ️ ${page}페이지: CSV에 groupNames 없는 blogId ${missingMetaCount}건`);
   }
 
-
-  // ... (기존 코드)
-  let data;
-  try {
-    const cleaned = stripNaverPrefix(raw);
-    data = JSON.parse(cleaned);
-    
-    // 🔍 [디버깅 추가] 네이버가 실제로 뭐라고 응답하는지 확인
-    if (page === MAX_PAGE) { // 너무 많이 찍히면 보기 힘드니 첫 페이지만 확인
-        console.log("🔍 네이버 응답 데이터:", JSON.stringify(data, null, 2));
-    }
-
-  } catch (e) {
-// ...
-
   // 네이버 응답은 최신 → 과거
   return { posts: posts.reverse() };
 }
