@@ -96,15 +96,25 @@ function sleep(ms) {
 function isRetryableNotionError(err) {
   const code = err.code || "";
   const msg = err.message || "";
+  const status = err.status; // HTTP Status Code 확인
+
+  // [수정] 500번대 에러(500, 502, 503, 504 등)는 서버 문제이므로 무조건 재시도
+  if (typeof status === 'number' && status >= 500) {
+    return true;
+  }
 
   return (
-    code === "notionhq_client_request_timeout" || // [수정] 타임아웃 에러 코드 추가
+    code === "notionhq_client_request_timeout" ||
+    code === "notionhq_client_response_error" || // [수정] 응답 에러(504 등) 코드 추가
     code === "internal_server_error" ||
     code === "rate_limited" ||
+    code === "service_unavailable" ||
     msg.includes("Connection terminated unexpectedly") ||
     msg.includes("ECONNRESET") ||
     msg.includes("ETIMEDOUT") ||
-    msg.includes("timeout") // [수정] 타임아웃 메시지 추가
+    msg.includes("timeout") ||
+    msg.includes("504") || // [수정] 504 Gateway Timeout 명시
+    msg.includes("502")    // [수정] 502 Bad Gateway 명시
   );
 }
 
@@ -130,7 +140,7 @@ async function withNotionRetry(action, desc, maxRetries = 5) {
       // [수정] 지수 백오프 적용 (1초, 2초, 4초, 8초, 16초...)
       const delay = 1000 * Math.pow(2, attempt - 1);
       console.warn(
-        `⚠️ Notion ${desc} 오류, 재시도 예정 (시도 ${attempt}/${maxRetries}, ${delay}ms 대기):`,
+        `⚠️ Notion ${desc} 오류(${err.status || err.code}), 재시도 예정 (시도 ${attempt}/${maxRetries}, ${delay}ms 대기):`,
         err.message || err
       );
       await sleep(delay);
