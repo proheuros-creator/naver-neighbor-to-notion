@@ -44,6 +44,7 @@ jobs:
 
     # 🧩 Node.js 앱에서 사용할 환경변수 설정
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
       NAVER_NEIGHBOR_API_URL: ${{ secrets.NAVER_NEIGHBOR_API_URL }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -59,7 +60,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # 3️⃣ 의존성 설치
       - name: Install dependencies
