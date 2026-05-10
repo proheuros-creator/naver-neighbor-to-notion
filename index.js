@@ -14,7 +14,7 @@
 
 import "dotenv/config";
 import fetch from "node-fetch";
-import { upsertPost } from "./notion.js";
+import { upsertPost, initCache } from "./notion.js";
 
 import fs from "fs";
 import path from "path";
@@ -284,6 +284,8 @@ async function main() {
     "🚀 전체 이웃 새글 → Notion 스크랩 시작 (CSV nickname/groupNames 우선 적용)"
   );
 
+  await initCache();
+
   let total = 0;
   for (let page = MAX_PAGE; page >= 1; page--) {
     const { posts } = await fetchPagePosts(page);
@@ -296,10 +298,9 @@ async function main() {
       } catch (err) {
         console.error("❌ Notion 저장 오류:", err.message);
       }
-      await new Promise((r) => setTimeout(r, 300));
     }
 
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 200));
   }
 
   console.log(`🎉 스크랩 완료 (총 ${total}건 처리 시도)`);
