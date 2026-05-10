@@ -148,8 +148,9 @@ async function withNotionRetry(action, desc, maxRetries = 5) {
 // 전체 DB 캐시 초기화 (시작 시 1회 호출)
 // ───────────────────────────────────────────────
 
-export async function initCache() {
-  console.log("🗄 Notion DB 전체 캐시 로드 시작...");
+export async function initCache(daysBack = 7) {
+  const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+  console.log(`🗄 Notion DB 캐시 로드 시작 (최근 ${daysBack}일, ${since.slice(0, 10)} 이후)...`);
   let cursor = undefined;
   let total = 0;
 
@@ -161,9 +162,13 @@ export async function initCache() {
           notion.databases.query({
             database_id: databaseId,
             page_size: 100,
+            filter: {
+              property: "원본 날짜",
+              date: { on_or_after: since },
+            },
             ...(cursor && { start_cursor: cursor }),
           }),
-        "전체 DB 캐시 로드"
+        "DB 캐시 로드"
       );
     } catch (err) {
       console.error("❌ 캐시 로드 실패:", err.message);
