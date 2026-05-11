@@ -1,0 +1,58 @@
+name: Scan Neighbors and Sync to Notion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install neighbor-activity deps
+        working-directory: ./neighbor-activity
+        run: npm install
+
+      - name: Run scan (generate CSV)
+        working-directory: ./neighbor-activity
+        env:
+          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
+        run: npm start
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neighbor-followings-result
+          path: neighbor-activity/neighbor-followings-result.csv
+
+      - name: Commit result CSV to repo
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git fetch origin main
+          git reset --hard origin/main
+
+          cp neighbor-activity/neighbor-followings-result.csv ./neighbor-followings-result.csv
+          git add neighbor-followings-result.csv
+
+          git commit -m "Add neighbor followings result [skip ci]" || echo "No changes"
+          git push origin HEAD:main
+
+      - name: Install BlogID deps
+        working-directory: ./BlogID
+        run: npm install
+
+      - name: Sync BlogID DB to Notion
+        working-directory: ./BlogID
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID_BLOGID: ${{ secrets.NOTION_DATABASE_ID_BLOGID }}
+        run: node sync-blogid-from-csv.js $GITHUB_WORKSPACE/neighbor-activity/neighbor-followings-result.csv
